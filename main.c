@@ -160,31 +160,32 @@ void turn (Actor* const actor, int degrees) {
 
 
 typedef enum {
-  MARK_TILE_PLAYER_ON
-} TileMarkReason;
+  MARK_TILE_PLAYER_ON,
+  MARK_DOT,
+} MarkReason;
 
 
 typedef struct {
-  TileMarkReason reason;
+  MarkReason reason;
   int x;
   int y;
-} TileMark;
+} Mark;
 
 
 typedef struct {
-  TileMark* marks;
+  Mark* marks;
   int len;
   int max_len;
-} TileMarkList;
+} MarkList;
 
 
-void mark_tile (TileMarkList* const list, TileMarkReason reason, int x, int y) {
+void mark (MarkList* const list, MarkReason reason, int x, int y) {
   if (list->len == list->max_len) {
     log_e("Tile mark list already at maximum capacity: %d", list->max_len);
     return;
   }
 
-  TileMark* const mark = &list->marks[list->len++];
+  Mark* const mark = &list->marks[list->len++];
   mark->reason = reason;
   mark->x = x;
   mark->y = y;
@@ -219,14 +220,88 @@ void check_corner (Actor* const player, const double angle, const int x, const i
 }
 
 
-void game (int frame, const Level level, TileMarkList* const marked_tiles, Actor* const player, const bool actions[]) {
+int find_voronoi (const int tx, const int ty, const int ax, const int ay) {
+  const double left = pc_corner(tx);
+  const double right = left + TILE_SIZE;
+  const double top = pc_corner(ty);
+  const double bottom = top + TILE_SIZE;
+
+  const bool in_left = ax < left;
+  const bool in_top = ay < top;
+  const bool in_right = ax > right;
+  const bool in_bottom = ay > bottom;
+
+  // Vertices
+  if (in_top && in_left) return 1;
+  else if (in_top && in_right) return 3;
+  else if (in_bottom && in_left) return 7;
+  else if (in_bottom && in_right) return 9;
+
+  // Edges (must check distance to center)
+  // NOTE: assume square tile
+  const int dx = ax - pc(tx);
+  const int dy = ay - pc(ty);
+
+  if (abs(dx) > abs(dy)) {
+    if (dx <= 0) {
+      return 4;
+    }
+    else {
+      return 6;
+    }
+  }
+  else {
+    if (dy <= 0) {
+      return 2;
+    }
+    else {
+      return 8;
+    }
+  }
+}
+
+
+double dot_product (double x1, double y1, double x2, double y2) {
+  return x1 * x2 + y1 * y2;
+}
+
+
+double length (double x, double y) {
+  return sqrt(x*x + y*y);
+}
+
+
+typedef struct {
+  double x;
+  double y;
+} Vector;
+
+
+// dirx, diry: push direction unit vector
+// thwx, thwy: tile halfwidth vector
+// r: circle radius 
+// tp_len: tile-circle centerpoint distance
+Vector find_push (double dirx, double diry, double thwx, double thwy, double r, double tp_len) {
+  const double dp = dot_product(dirx, diry, thwx, thwy);
+
+  const double tprox = dp * dirx;
+  const double tproy = dp * diry;
+
+  const double push_len = r + dp - tp_len;
+
+  Vector push = { dirx * push_len, diry * push_len };
+  return push;
+}
+
+
+void game (int frame, const Level level, MarkList* const mark_list, Actor* const player, const bool actions[]) {
   if (actions[LEFT] | actions[RIGHT]) {
     turn(player, actions[LEFT] ? 6 : -6);
   }
   if (actions[FORWARD] || actions[BACKWARD]) {
     double angle_rad = player->angle / 180.0 * M_PI;
 
-    const double step = actions[FORWARD] ? 1 : -1;
+    const double step = actions[FORWARD] ? 5 : -5;
 
     player->x += step * cos(angle_rad);
     player->y -= step * sin(angle_rad);
@@ -241,27 +316,58 @@ void game (int frame, const Level level, TileMarkList* const marked_tiles, Actor
 
   for (int y = top; y <= bottom; ++y) {
     for (int x = left; x <= right; ++x) {
-      mark_tile(marked_tiles, MARK_TILE_PLAYER_ON, x, y);
+      mark(mark_list, MARK_TILE_PLAYER_ON, x, y);
       if (!passable(tile_at(level, x, y))) {
-        const int tx = pc(x);
-        const int ty = pc(y);
+        const double tx = pc(x);
+        const double ty = pc(y);
 
-        const double hit_angle = atan2((double)ty - player->y,
-                                       (double)tx - player->x);
+        const double tpx = player->x - tx;
+        const double tpy = player->y - ty;
 
-        const int left = pc_corner(x);
-        const int right = pc_corner(x) + TILE_SIZE;
-        const int top = pc_corner(y);
-        const int bottom = pc_corner(y) + TILE_SIZE;
-        check_corner(player, hit_angle, left, top);
-        check_corner(player, hit_angle, left, bottom);
-        check_corner(player, hit_angle, right, top);
-        check_corner(player, hit_angle, right, bottom);
+        const double tp_len = length(tpx, tpy);
 
-        /* if (d(player->x, player->y, tx, ty) < player->radius + tr) { */
-        /*   player->x = tx - (player->radius + tr) * cos(hit_angle); */
-        /*   player->y = ty - (player->radius + tr) * sin(hit_angle); */
-        /* } */
+        const double dirx = tpx / tp_len;
+        const double diry = tpy / tp_len;
+
+        Vector push = { 0.0, 0.0 };
+
+        const int voronoi = find_voronoi(x, y, player->x, player->y);
+        switch (voronoi) {
+          case 2:
+            push.y = pc_corner(y) - player->y - player->radius;
+            break;
+
+          case 4:
+            push.x = pc_corner(x) - player->x - player->radius;
+            break;
+
+          case 6:
+            push.x = pc_corner(x) + TILE_SIZE - player->x + player->radius;
+            break;
+
+          case 8:
+            push.y = pc_corner(y) + TILE_SIZE - player->y + player->radius;
+            break;
+
+          case 1:
+            push = find_push(dirx, diry, -tr, -tr, player->radius, tp_len);
+            break;
+
+          case 3:
+            push = find_push(dirx, diry, tr, -tr, player->radius, tp_len);
+            break;
+
+          case 7:
+            push = find_push(dirx, diry, -tr, tr, player->radius, tp_len);
+            break;
+
+          case 9:
+            push = find_push(dirx, diry, tr, tr, player->radius, tp_len);
+            break;
+        }
+        
+        player->x += round(push.x);
+        player->y += round(push.y);
       }
     }
   }
@@ -398,6 +504,7 @@ int main (int argc, char *argv[]) {
   GLint tex_wall = load_texture("wall.png", TEXTURE_SIZE);
   GLint tex_actor = load_texture("actor.png", TEXTURE_SIZE);
   GLint tex_mark = load_texture("mark.png", TEXTURE_SIZE);
+  GLint tex_dot = load_texture("dot.png", TEXTURE_SIZE);
 
   GLint tile_textures[] = { tex_floor, tex_wall };
 
@@ -457,8 +564,8 @@ int main (int argc, char *argv[]) {
     /* } */
     /* fprintf(stderr, "\n"); */
 
-    TileMark marks[100];
-    TileMarkList mark_list = { .marks = marks, .len = 0, .max_len = 100 };
+    Mark marks[100];
+    MarkList mark_list = { .marks = marks, .len = 0, .max_len = 100 };
 
     game(frame++, level, &mark_list, &player, actions);
 
@@ -467,7 +574,14 @@ int main (int argc, char *argv[]) {
     draw_level(level, tile_textures);
 
     for (int i = 0; i < mark_list.len; ++i) {
-      draw_tile(tex_mark, marks[i].x, marks[i].y);
+      switch (marks[i].reason) {
+        case MARK_TILE_PLAYER_ON:
+          draw_tile(tex_mark, marks[i].x, marks[i].y);
+          break;
+        case MARK_DOT:
+          draw_texture(tex_dot, marks[i].x, marks[i].y, 0, true);
+          break;
+      }
     }
 
     draw_texture(tex_actor, player.x, player.y, player.angle, true);
