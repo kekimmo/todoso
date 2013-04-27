@@ -15,7 +15,7 @@
 
 
 static const int TEXTURE_SIZE = 32;
-static const int TILE_SIZE = 32;
+static const int TILE_SIZE = 320;
 
 
 static const int NULL_TEXTURE = 0;
@@ -404,7 +404,7 @@ void game (int frame, const Level level, MarkList* const mark_list, Actor* const
   if (actions[FORWARD] || actions[BACKWARD]) {
     double angle_rad = player->angle / 180.0 * M_PI;
 
-    const double step = actions[FORWARD] ? 5 : -5;
+    const double step = actions[FORWARD] ? 20 : -10;
 
     player->x += step * cos(angle_rad);
     player->y -= step * sin(angle_rad);
@@ -475,7 +475,7 @@ void draw_texture (const int texture, const int x, const int y, const int angle,
   glBindTexture(GL_TEXTURE_2D, texture);
 
   glLoadIdentity();
-  glTranslated(x, y, 0);
+  glTranslated(x / 10.0, y / 10.0, 0.0);
   glRotated(angle, 0.0, 0.0, -1.0);
 
   glScaled(TEXTURE_SIZE, TEXTURE_SIZE, 1);
@@ -559,7 +559,7 @@ int main (int argc, char *argv[]) {
 
   int frame = 0;
 
-  Actor player = { .radius = 16, .x = pc(1), .y = pc(1), .angle = 0 };
+  Actor player = { .radius = 150, .x = pc(1), .y = pc(1), .angle = 0 };
 
   typedef struct {
     Action action;
