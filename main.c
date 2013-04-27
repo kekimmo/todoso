@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <string.h>
+#include <assert.h>
 
 #define GL_GLEXT_PROTOTYPES
 #include <SDL/SDL.h>
@@ -13,10 +14,36 @@
 #include <png.h>
 
 
+static const int TEXTURE_SIZE = 32;
+static const int TILE_SIZE = 32;
+
+
+static const int NULL_TEXTURE = 0;
+
+
+
+// Tile coordinate to pixel coordinate (center of tile)
+int pc (const int tile_coord) {
+  return tile_coord * TILE_SIZE + TILE_SIZE / 2;
+}
+
+
+int pc_corner (const int tile_coord) {
+  return tile_coord * TILE_SIZE;
+}
+
+
+// Pixel coordinate to tile coordinate
+int tc (const int pixel_coord) {
+  return pixel_coord / TILE_SIZE;
+}
+
+
 typedef struct {
   int x;
   int y;
   int angle;
+  int radius;
 } Actor;
 
 
@@ -31,9 +58,9 @@ const int ACTION_COUNT = NOP + 1;
 
 
 typedef struct {
-  unsigned int width;
-  unsigned int height;
-  unsigned int* tiles;
+  int width;
+  int height;
+  int* tiles;
 } Level;
 
 
@@ -82,11 +109,27 @@ bool load_level (const char* filename, Level* level) {
     }
   }
 
+  rewind(file);
+
   log_d("Level dimensions: %d x %d", width, height);
 
   level->width = width;
   level->height = height;
-  level->tiles = NULL;
+
+  level->tiles = malloc(width * height * sizeof(int));
+  if (!level->tiles) {
+    log_e("Memory allocation failed: %s", strerror(errno));
+    return false;
+  }
+
+  int i = 0;
+  while (!feof(file)) {
+    char c = fgetc(file);
+    if (c == '\n') {
+      continue;
+    }
+    level->tiles[i++] = c == '#' ? 1 : 0;
+  }
 
   return true;
 }
@@ -97,19 +140,130 @@ void free_level (Level level) {
 }
 
 
-void game (int frame, const Level level, Actor* const player, const bool actions[]) {
+int d (int x1, int y1, int x2, int y2) {
+  return round(sqrt(pow(x2 - x1, 2) + pow(y2 - y1, 2)));
+}
 
+
+void turn (Actor* const actor, int degrees) {
+  degrees += actor->angle;
+  degrees %= 360;
+  if (degrees < 0) {
+    degrees = 360 + degrees;
+  }
+
+  assert(degrees >= 0);
+  assert(degrees < 360);
+
+  actor->angle = degrees;
+}
+
+
+typedef enum {
+  MARK_TILE_PLAYER_ON
+} TileMarkReason;
+
+
+typedef struct {
+  TileMarkReason reason;
+  int x;
+  int y;
+} TileMark;
+
+
+typedef struct {
+  TileMark* marks;
+  int len;
+  int max_len;
+} TileMarkList;
+
+
+void mark_tile (TileMarkList* const list, TileMarkReason reason, int x, int y) {
+  if (list->len == list->max_len) {
+    log_e("Tile mark list already at maximum capacity: %d", list->max_len);
+    return;
+  }
+
+  TileMark* const mark = &list->marks[list->len++];
+  mark->reason = reason;
+  mark->x = x;
+  mark->y = y;
+}
+
+
+bool passable (const int tile) {
+  return tile == 0;
+}
+
+
+int tile_at (const Level level, const int x, const int y) {
+  assert(x >= 0);
+  assert(x < level.width);
+  assert(y >= 0);
+  assert(y < level.height);
+  return level.tiles[y * level.width + x];
+}
+
+
+int sign (const int number) {
+  return (number > 0) - (number < 0);
+}
+
+
+void check_corner (Actor* const player, const double angle, const int x, const int y) {
+  if (d(x, y, player->x, player->y) < player->radius) {
+    
+    player->x = x - player->radius * cos(angle);
+    player->y = y - player->radius * sin(angle);
+  }
+}
+
+
+void game (int frame, const Level level, TileMarkList* const marked_tiles, Actor* const player, const bool actions[]) {
   if (actions[LEFT] | actions[RIGHT]) {
-    const int turn = actions[LEFT] ? 6 : -6;
-    player->angle += turn;
+    turn(player, actions[LEFT] ? 6 : -6);
   }
   if (actions[FORWARD] || actions[BACKWARD]) {
     double angle_rad = player->angle / 180.0 * M_PI;
 
-    const double step = actions[FORWARD] ? 5 : -3;
+    const double step = actions[FORWARD] ? 1 : -1;
 
     player->x += step * cos(angle_rad);
     player->y -= step * sin(angle_rad);
+  }
+
+  const int left = tc(player->x - player->radius);
+  const int right = tc(player->x + player->radius);
+  const int top = tc(player->y - player->radius);
+  const int bottom = tc(player->y + player->radius);
+
+  const int tr = TILE_SIZE / 2;
+
+  for (int y = top; y <= bottom; ++y) {
+    for (int x = left; x <= right; ++x) {
+      mark_tile(marked_tiles, MARK_TILE_PLAYER_ON, x, y);
+      if (!passable(tile_at(level, x, y))) {
+        const int tx = pc(x);
+        const int ty = pc(y);
+
+        const double hit_angle = atan2((double)ty - player->y,
+                                       (double)tx - player->x);
+
+        const int left = pc_corner(x);
+        const int right = pc_corner(x) + TILE_SIZE;
+        const int top = pc_corner(y);
+        const int bottom = pc_corner(y) + TILE_SIZE;
+        check_corner(player, hit_angle, left, top);
+        check_corner(player, hit_angle, left, bottom);
+        check_corner(player, hit_angle, right, top);
+        check_corner(player, hit_angle, right, bottom);
+
+        /* if (d(player->x, player->y, tx, ty) < player->radius + tr) { */
+        /*   player->x = tx - (player->radius + tr) * cos(hit_angle); */
+        /*   player->y = ty - (player->radius + tr) * sin(hit_angle); */
+        /* } */
+      }
+    }
   }
 }
 
@@ -119,8 +273,13 @@ void print_error (void) {
 }
 
 
-GLuint load_texture (const char* filename, const int tile_size) {
+GLint load_texture (const char* filename, const int texture_size) {
   FILE* file = fopen(filename, "rb");
+  if (file == NULL) {
+    log_e("Failed to open %s: %s", filename, strerror(errno));
+    return NULL_TEXTURE;
+  }
+
   static const int HEADER_SIZE = 8;
 
   png_byte header[HEADER_SIZE];
@@ -137,15 +296,15 @@ GLuint load_texture (const char* filename, const int tile_size) {
   png_read_info(png_ptr, info_ptr);
 
   const size_t row_bytes = png_get_rowbytes(png_ptr, info_ptr);
-  png_byte data[tile_size * row_bytes];
-  for (int row = 0; row < tile_size; ++row) {
+  png_byte data[texture_size * row_bytes];
+  for (int row = 0; row < texture_size; ++row) {
     png_read_row(png_ptr, data + row * row_bytes, NULL);
   }
 
-  GLuint texture;
+  GLint texture;
   glGenTextures(1, &texture);
   glBindTexture(GL_TEXTURE_2D, texture);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tile_size, tile_size, 0,
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, texture_size, texture_size, 0,
       GL_RGBA, GL_UNSIGNED_BYTE, data);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   //print_error();
@@ -157,14 +316,14 @@ GLuint load_texture (const char* filename, const int tile_size) {
 }
 
 
-void draw_texture (const int texture_size, const int texture, const int x, const int y, const int angle, const bool center) {
+void draw_texture (const int texture, const int x, const int y, const int angle, const bool center) {
   glBindTexture(GL_TEXTURE_2D, texture);
 
   glLoadIdentity();
   glTranslated(x, y, 0);
   glRotated(angle, 0.0, 0.0, -1.0);
 
-  glScaled(32, 32, 1);
+  glScaled(TEXTURE_SIZE, TEXTURE_SIZE, 1);
 
   if (!center) {
     glTranslated(0.5, 0.5, 0);
@@ -188,6 +347,28 @@ void draw_texture (const int texture_size, const int texture, const int x, const
 }
 
 
+void draw_tile (const int texture, const int x, const int y) {
+  if (texture == NULL_TEXTURE) {
+    log_e("Attempted to draw with NULL_TEXTURE: %d", NULL_TEXTURE);
+    return;
+  }
+  draw_texture(texture, pc(x), pc(y), 0, true);
+}
+
+
+void draw_level (const Level level, const GLint tile_textures[]) {
+  int i = 0;
+  for (int y = 0; y < level.height; ++y) {
+    for (int x = 0; x < level.width; ++x) {
+      const int tile = level.tiles[i];
+      const GLint texture = tile_textures[tile];
+      draw_tile(texture, x, y); 
+      ++i;
+    }
+  }
+} 
+
+
 int main (int argc, char *argv[]) {
   SDL_Init(SDL_INIT_VIDEO);
 
@@ -196,8 +377,6 @@ int main (int argc, char *argv[]) {
 
   const int win_w = 800;
   const int win_h = 600;
-
-  const int texture_size = 32;
 
   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
@@ -214,12 +393,17 @@ int main (int argc, char *argv[]) {
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glEnable(GL_TEXTURE_2D);
-  GLuint tex_tile = load_texture("tile.png", texture_size);
-  GLuint tex_actor = load_texture("char.png", texture_size);
+
+  GLint tex_floor = load_texture("floor.png", TEXTURE_SIZE);
+  GLint tex_wall = load_texture("wall.png", TEXTURE_SIZE);
+  GLint tex_actor = load_texture("actor.png", TEXTURE_SIZE);
+  GLint tex_mark = load_texture("mark.png", TEXTURE_SIZE);
+
+  GLint tile_textures[] = { tex_floor, tex_wall };
 
   int frame = 0;
 
-  Actor player = { .x = 300, .y = 200, .angle = 0 };
+  Actor player = { .radius = 16, .x = pc(1), .y = pc(1), .angle = 0 };
 
   typedef struct {
     Action action;
@@ -273,15 +457,25 @@ int main (int argc, char *argv[]) {
     /* } */
     /* fprintf(stderr, "\n"); */
 
+    TileMark marks[100];
+    TileMarkList mark_list = { .marks = marks, .len = 0, .max_len = 100 };
+
+    game(frame++, level, &mark_list, &player, actions);
+
     glClear(GL_COLOR_BUFFER_BIT);
-    glLoadIdentity();
-    game(frame++, level, &player, actions);
-    draw_texture(texture_size, tex_tile, 0, 0, 0, false);
-    draw_texture(texture_size, tex_actor, player.x, player.y, player.angle, true);
+
+    draw_level(level, tile_textures);
+
+    for (int i = 0; i < mark_list.len; ++i) {
+      draw_tile(tex_mark, marks[i].x, marks[i].y);
+    }
+
+    draw_texture(tex_actor, player.x, player.y, player.angle, true);
 
     SDL_GL_SwapBuffers();
   }
 
   SDL_Quit();
 }
+
 
