@@ -206,8 +206,8 @@ int tile_at (const Level level, const int x, const int y) {
 }
 
 
-int sign (const int number) {
-  return (number > 0) - (number < 0);
+int sign (const double number) {
+  return (number > 0.0) - (number < 0.0);
 }
 
 
@@ -287,10 +287,113 @@ Vector find_push (double dirx, double diry, double thwx, double thwy, double r, 
   const double tprox = dp * dirx;
   const double tproy = dp * diry;
 
-  const double push_len = r + dp - tp_len;
+  double push_len = r + dp - tp_len;
+  if (push_len < 0.0) {
+    push_len = 0.0;
+  }
 
   Vector push = { dirx * push_len, diry * push_len };
   return push;
+}
+
+
+bool collide (MarkList* const mark_list, const Level level, Actor* const actor) {
+  const int left = tc(actor->x - actor->radius);
+  const int right = tc(actor->x + actor->radius);
+  const int top = tc(actor->y - actor->radius);
+  const int bottom = tc(actor->y + actor->radius);
+
+  const int tr = TILE_SIZE / 2;
+
+  bool moved = false;
+
+  for (int y = top; y <= bottom; ++y) {
+    for (int x = left; x <= right; ++x) {
+      const int tcx = pc_corner(x);
+      const int tcy = pc_corner(y);
+
+      const int al = actor->x - actor->radius;
+      const int at = actor->y - actor->radius;
+      const int ar = actor->x + actor->radius;
+      const int ab = actor->y + actor->radius;
+
+      if (ar <= tcx) continue;
+      if (ab <= tcy) continue;
+      if (al >= tcx + TILE_SIZE) continue;
+      if (at >= tcy + TILE_SIZE) continue;
+
+      mark(mark_list, MARK_TILE_PLAYER_ON, x, y);
+      if (!passable(tile_at(level, x, y))) {
+        const double tpx = actor->x - pc(x);
+        const double tpy = actor->y - pc(y);
+
+        const double tp_len = length(tpx, tpy);
+
+        const double dirx = tpx / tp_len;
+        const double diry = tpy / tp_len;
+
+        Vector push = { 0.0, 0.0 };
+
+        const int voronoi = find_voronoi(x, y, actor->x, actor->y);
+        switch (voronoi) {
+          case 2:
+            push.y = tcy - ab;
+            assert(push.y < 0);
+            break;
+
+          case 4:
+            push.x = tcx - ar;
+            assert(push.x < 0);
+            break;
+
+          case 6:
+            push.x = tcx + TILE_SIZE - al;
+            assert(push.x > 0);
+            break;
+
+          case 8:
+            push.y = tcy + TILE_SIZE - at;
+            assert(push.y > 0);
+            break;
+
+          case 1:
+            push = find_push(dirx, diry, -tr, -tr, actor->radius, tp_len);
+            assert(push.x <= 0);
+            assert(push.y <= 0);
+            break;
+
+          case 3:
+            push = find_push(dirx, diry, tr, -tr, actor->radius, tp_len);
+            assert(push.x >= 0);
+            assert(push.y <= 0);
+            break;
+
+          case 7:
+            push = find_push(dirx, diry, -tr, tr, actor->radius, tp_len);
+            assert(push.x <= 0);
+            assert(push.y >= 0);
+            break;
+
+          case 9:
+            push = find_push(dirx, diry, tr, tr, actor->radius, tp_len);
+            assert(push.x >= 0);
+            assert(push.y >= 0);
+            break;
+        }
+        
+        const int ix = round(push.x + 0.5 * sign(push.x)); 
+        const int iy = round(push.y + 0.5 * sign(push.y));
+
+        if (ix != 0 || iy != 0) {
+          actor->x += ix;
+          actor->y += iy;
+          moved = true;
+        }
+      }
+    }
+  }
+
+  return moved;
 }
 
 
@@ -307,70 +410,16 @@ void game (int frame, const Level level, MarkList* const mark_list, Actor* const
     player->y -= step * sin(angle_rad);
   }
 
-  const int left = tc(player->x - player->radius);
-  const int right = tc(player->x + player->radius);
-  const int top = tc(player->y - player->radius);
-  const int bottom = tc(player->y + player->radius);
-
-  const int tr = TILE_SIZE / 2;
-
-  for (int y = top; y <= bottom; ++y) {
-    for (int x = left; x <= right; ++x) {
-      mark(mark_list, MARK_TILE_PLAYER_ON, x, y);
-      if (!passable(tile_at(level, x, y))) {
-        const double tx = pc(x);
-        const double ty = pc(y);
-
-        const double tpx = player->x - tx;
-        const double tpy = player->y - ty;
-
-        const double tp_len = length(tpx, tpy);
-
-        const double dirx = tpx / tp_len;
-        const double diry = tpy / tp_len;
-
-        Vector push = { 0.0, 0.0 };
-
-        const int voronoi = find_voronoi(x, y, player->x, player->y);
-        switch (voronoi) {
-          case 2:
-            push.y = pc_corner(y) - player->y - player->radius;
-            break;
-
-          case 4:
-            push.x = pc_corner(x) - player->x - player->radius;
-            break;
-
-          case 6:
-            push.x = pc_corner(x) + TILE_SIZE - player->x + player->radius;
-            break;
-
-          case 8:
-            push.y = pc_corner(y) + TILE_SIZE - player->y + player->radius;
-            break;
-
-          case 1:
-            push = find_push(dirx, diry, -tr, -tr, player->radius, tp_len);
-            break;
-
-          case 3:
-            push = find_push(dirx, diry, tr, -tr, player->radius, tp_len);
-            break;
-
-          case 7:
-            push = find_push(dirx, diry, -tr, tr, player->radius, tp_len);
-            break;
-
-          case 9:
-            push = find_push(dirx, diry, tr, tr, player->radius, tp_len);
-            break;
-        }
-        
-        player->x += round(push.x);
-        player->y += round(push.y);
-      }
+  static const int tries = 10;
+  int i = 0;
+  do {
+    if (i == tries) {
+      log_e("Collision state still unsettled after %d tries, giving up!",
+          tries);
+      break;
     }
-  }
+    ++i;
+  } while (collide(mark_list, level, player));
 }
 
 
