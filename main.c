@@ -125,7 +125,7 @@ bool load_level (const char* filename, Level* level) {
   int i = 0;
   while (!feof(file)) {
     char c = fgetc(file);
-    if (c == '\n') {
+    if (c == '\n' || c == EOF) {
       continue;
     }
     level->tiles[i++] = c == '#' ? 1 : 0;
@@ -162,6 +162,7 @@ void turn (Actor* const actor, int degrees) {
 typedef enum {
   MARK_TILE_PLAYER_ON,
   MARK_DOT,
+  MARK_CAN_SEE,
 } MarkReason;
 
 
@@ -197,12 +198,17 @@ bool passable (const int tile) {
 }
 
 
-int tile_at (const Level level, const int x, const int y) {
+int tile_at (const Level* const level, const int x, const int y) {
   assert(x >= 0);
-  assert(x < level.width);
+  assert(x < level->width);
   assert(y >= 0);
-  assert(y < level.height);
-  return level.tiles[y * level.width + x];
+  assert(y < level->height);
+  return level->tiles[y * level->width + x];
+}
+
+
+bool see_through (const Level* const level, const int x, const int y) {
+  return tile_at(level, x, y) == 0;
 }
 
 
@@ -323,7 +329,7 @@ bool collide (MarkList* const mark_list, const Level level, Actor* const actor) 
       if (at >= tcy + TILE_SIZE) continue;
 
       mark(mark_list, MARK_TILE_PLAYER_ON, x, y);
-      if (!passable(tile_at(level, x, y))) {
+      if (!passable(tile_at(&level, x, y))) {
         const double tpx = actor->x - pc(x);
         const double tpy = actor->y - pc(y);
 
@@ -423,6 +429,168 @@ void game (int frame, const Level level, MarkList* const mark_list, Actor* const
 }
 
 
+typedef struct {
+  int x;
+  int y;
+} Point;
+
+
+int clamp (int number, int lower, int upper) {
+  assert(lower <= upper);
+
+  if (number < lower) {
+    return lower;
+  }
+  else if (number > upper) {
+    return upper;
+  }
+  else {
+    return number;
+  }
+}
+
+
+typedef struct {
+  int ox;
+  int oy;
+  int width;
+  int height;
+  bool* tiles;
+} Sight;
+
+
+void free_sight (Sight* const sight) {
+  free(sight->tiles);
+  free(sight);
+}
+
+
+void sight_set (Sight* const sight, int x, int y) {
+  const int sx = x - sight->ox;
+  const int sy = y - sight->oy;
+  assert(sx >= 0);
+  assert(sy >= 0);
+  assert(sx < sight->width);
+  assert(sy < sight->height);
+  sight->tiles[sy * sight->width + sx] = true;
+}
+
+
+bool sight_get (const Sight* const sight, int x, int y) {
+  const int sx = x - sight->ox;
+  const int sy = y - sight->oy;
+  if (sx < 0 || sy < 0 || sx >= sight->width || sy >= sight->height) {
+    return false;
+  }
+  return sight->tiles[sy * sight->width + sx];
+}
+
+
+void bresenham (int x0, int y0, int x1, int y1, bool (*callback) (void*, int, int), void* data) {
+  const int dx = abs(x1 - x0);
+  const int dy = abs(y1 - y0);
+
+  const int sx = (x0 < x1) ? 1 : -1;
+  const int sy = (y0 < y1) ? 1 : -1;
+
+  int err = dx - dy;
+
+  for (;;) {
+    const bool cont = callback(data, x0, y0);
+
+    if (!cont || x0 == x1 && y0 == y1) {
+      break;
+    }
+
+    const int e2 = 2 * err;
+    if (e2 > -dy) {
+      err -= dy;
+      x0 += sx;
+    }
+    if (e2 < dx) {
+      err += dx;
+      y0 += sy;
+    }
+  }
+}
+
+
+bool sight_callback (void* data, int x, int y) {
+  void** params = data;
+
+  const Level* level = params[0];
+  Sight* sight = params[1];
+
+  sight_set(sight, x, y);
+
+  return see_through(level, x, y);
+}
+
+
+Sight* compute_sight (Level level, const Actor actor, int radius) {
+  Sight* sight = malloc(sizeof(Sight));;
+  if (sight == NULL) {
+    log_e("Failed to allocate Sight: %s", strerror(errno));
+    return NULL;
+  }
+
+  const int atx = tc(actor.x);
+  const int aty = tc(actor.y);
+
+  // Offset (top left tile)
+  sight->ox = clamp(atx - radius, 0, level.width - 1);
+  sight->oy = clamp(aty - radius, 0, level.height - 1);
+  //log_d("Sight offset: (%d, %d)", sight->ox, sight->oy);
+
+  // Table dimensions
+  // Example: radius 1
+  // ...
+  // .@.
+  // ...
+  const int side = (radius + 1) * (radius + 1);
+
+  sight->width = clamp(side, 1, level.width - sight->ox);
+  sight->height = clamp(side, 1, level.height - sight->oy);
+  //log_d("Sight dimensions: %d x %d", sight->width, sight->height);
+
+  sight->tiles = calloc(sight->width * sight->height, sizeof(bool));
+  if (sight->tiles == NULL) {
+    log_e("Failed to allocate sight table: %s", strerror(errno));
+    free(sight);
+    return NULL;
+  }
+
+  void* data[] = { &level, sight };
+  int x = radius;
+  int y = 0;
+  int dx = 1 - radius*2;
+  int dy = 0;
+  int err = 0;
+
+  while (x >= y) {
+    bresenham(atx, aty, atx + x, aty + y, sight_callback, data);
+    bresenham(atx, aty, atx + y, aty + x, sight_callback, data);
+    bresenham(atx, aty, atx - x, aty + y, sight_callback, data);
+    bresenham(atx, aty, atx - y, aty + x, sight_callback, data);
+    bresenham(atx, aty, atx - x, aty - y, sight_callback, data);
+    bresenham(atx, aty, atx - y, aty - x, sight_callback, data);
+    bresenham(atx, aty, atx + x, aty - y, sight_callback, data);
+    bresenham(atx, aty, atx + y, aty - x, sight_callback, data);
+
+    ++y;
+    err += dy;
+    dy += 2;
+    if ((err << 1) + dx > 0) {
+      --x;
+      err += dx;
+      dx += 2;
+    }
+  };
+
+  return sight;
+}
+
+
 void print_error (void) {
   fprintf(stderr, "Error: %s\n", gluErrorString(glGetError()));
 }
@@ -511,13 +679,17 @@ void draw_tile (const int texture, const int x, const int y) {
 }
 
 
-void draw_level (const Level level, const GLint tile_textures[]) {
+void draw_level (const Level level, const GLuint tile_textures[],
+    const GLuint darkness, const Sight* const sight) {
   int i = 0;
   for (int y = 0; y < level.height; ++y) {
     for (int x = 0; x < level.width; ++x) {
       const int tile = level.tiles[i];
-      const GLint texture = tile_textures[tile];
+      const GLuint texture = tile_textures[tile];
       draw_tile(texture, x, y); 
+      if (!sight_get(sight, x, y)) {
+        draw_tile(darkness, x, y);
+      }
       ++i;
     }
   }
@@ -554,6 +726,7 @@ int main (int argc, char *argv[]) {
   GLint tex_actor = load_texture("actor.png", TEXTURE_SIZE);
   GLint tex_mark = load_texture("mark.png", TEXTURE_SIZE);
   GLint tex_dot = load_texture("dot.png", TEXTURE_SIZE);
+  GLint tex_darkness = load_texture("darkness.png", TEXTURE_SIZE);
 
   GLint tile_textures[] = { tex_floor, tex_wall };
 
@@ -618,9 +791,13 @@ int main (int argc, char *argv[]) {
 
     game(frame++, level, &mark_list, &player, actions);
 
+    const int sight_radius = 10;
+    Sight* sight = compute_sight(level, player, sight_radius);
+
     glClear(GL_COLOR_BUFFER_BIT);
 
-    draw_level(level, tile_textures);
+    draw_level(level, tile_textures, tex_darkness, sight);
+    free_sight(sight);
 
     for (int i = 0; i < mark_list.len; ++i) {
       switch (marks[i].reason) {
@@ -637,6 +814,8 @@ int main (int argc, char *argv[]) {
 
     SDL_GL_SwapBuffers();
   }
+
+  free_level(level);
 
   SDL_Quit();
 }
