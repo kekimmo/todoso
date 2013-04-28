@@ -410,7 +410,7 @@ void game (int frame, const Level level, MarkList* const mark_list, Actor* const
   if (actions[FORWARD] || actions[BACKWARD]) {
     double angle_rad = player->angle / 180.0 * M_PI;
 
-    const double step = actions[FORWARD] ? 20 : -10;
+    const double step = actions[FORWARD] ? 40 : -20;
 
     player->x += step * cos(angle_rad);
     player->y -= step * sin(angle_rad);
@@ -482,7 +482,11 @@ bool sight_get (const Sight* const sight, int x, int y) {
   if (sx < 0 || sy < 0 || sx >= sight->width || sy >= sight->height) {
     return false;
   }
-  return sight->tiles[sy * sight->width + sx];
+  return sight->tiles[sy * sight->width + sx] ||
+    ((sx == 0 ||  sight->tiles[sy * sight->width + sx - 1]) &&
+     (sx == sight->width - 1 || sight->tiles[sy * sight->width + sx + 1]) &&
+     (sy == 0 || sight->tiles[(sy - 1) * sight->width + sx]) &&
+     (sy == sight->width - 1 || sight->tiles[sy * sight->width + sx - 1]));
 }
 
 
@@ -563,7 +567,7 @@ Sight* compute_sight (Level level, const Actor actor, int radius) {
   void* data[] = { &level, sight };
   int x = radius;
   int y = 0;
-  int dx = 1 - radius*2;
+  int dx = 1 - radius * 2;
   int dy = 0;
   int err = 0;
 
@@ -585,7 +589,7 @@ Sight* compute_sight (Level level, const Actor actor, int radius) {
       err += dx;
       dx += 2;
     }
-  };
+  }
 
   return sight;
 }
@@ -791,7 +795,7 @@ int main (int argc, char *argv[]) {
 
     game(frame++, level, &mark_list, &player, actions);
 
-    const int sight_radius = 10;
+    const int sight_radius = 5;
     Sight* sight = compute_sight(level, player, sight_radius);
 
     glClear(GL_COLOR_BUFFER_BIT);
