@@ -52,15 +52,25 @@ typedef enum {
   BACKWARD,
   LEFT,
   RIGHT,
+  ACTIVATE,
   NOP,
 } Action;
 const int ACTION_COUNT = NOP + 1;
 
 
+typedef struct Tile_ Tile;
+struct Tile_ {
+  int code;
+  bool active;
+  bool (*passable) (const Tile*);
+  bool (*see_through) (const Tile*);
+};
+
+
 typedef struct {
   int width;
   int height;
-  int* tiles;
+  Tile* tiles;
 } Level;
 
 
@@ -86,6 +96,41 @@ void actual_log (const LogLevel level, const char* file, const int line,
 
 #define log_e(fmt,...) macro_log(ERROR, fmt, __VA_ARGS__)
 #define log_d(fmt,...) macro_log(DEBUG, fmt, __VA_ARGS__)
+
+
+bool tile_always (const Tile* tile) {
+  return true;
+}
+
+bool tile_never (const Tile* tile) {
+  return false;
+}
+
+bool tile_if_active (const Tile* tile) {
+  return tile->active;
+}
+
+
+Tile* tile_at (const Level* const level, const int x, const int y) {
+  assert(x >= 0);
+  assert(x < level->width);
+  assert(y >= 0);
+  assert(y < level->height);
+  return &level->tiles[y * level->width + x];
+}
+
+
+bool passable (const Level* const level, const int x, const int y) {
+  const Tile* tile = tile_at(level, x, y);
+  return tile->passable(tile);
+}
+
+
+bool see_through (const Level* const level, const int x, const int y) {
+  const Tile* tile = tile_at(level, x, y);
+  return tile->see_through(tile);
+}
+
 
 
 bool load_level (const char* filename, Level* level) {
@@ -116,8 +161,8 @@ bool load_level (const char* filename, Level* level) {
   level->width = width;
   level->height = height;
 
-  level->tiles = malloc(width * height * sizeof(int));
-  if (!level->tiles) {
+  level->tiles = calloc(width * height, sizeof(Tile));
+  if (!level->tiles) { 
     log_e("Memory allocation failed: %s", strerror(errno));
     return false;
   }
@@ -128,7 +173,41 @@ bool load_level (const char* filename, Level* level) {
     if (c == '\n' || c == EOF) {
       continue;
     }
-    level->tiles[i++] = c == '#' ? 1 : 0;
+
+    Tile* t = &level->tiles[i++];
+
+    t->code = 0;
+    t->active = false;
+    t->passable = tile_never;
+    t->see_through = tile_never;
+
+    switch (c) {
+      case ' ':
+        t->passable = tile_always;
+        t->see_through = tile_always;
+        break;
+
+      case '#':
+        t->code = 1;
+        break;
+
+      case '+':
+        t->code = 2;
+        t->passable = tile_if_active;
+        t->see_through = tile_if_active;
+        break;
+
+      default:
+        log_e("Invalid tile: '%c'", c);
+        break;
+    }
+  }
+
+  for (int y = 0; y < level->height; ++y) {
+    for (int x = 0; x < level->width; ++x) {
+      passable(level, x, y);
+      see_through(level, x, y);
+    }
   }
 
   return true;
@@ -161,6 +240,7 @@ void turn (Actor* const actor, int degrees) {
 
 typedef enum {
   MARK_TILE_PLAYER_ON,
+  MARK_TILE_PLAYER_FACING,
   MARK_DOT,
   MARK_CAN_SEE,
 } MarkReason;
@@ -190,25 +270,6 @@ void mark (MarkList* const list, MarkReason reason, int x, int y) {
   mark->reason = reason;
   mark->x = x;
   mark->y = y;
-}
-
-
-bool passable (const int tile) {
-  return tile == 0;
-}
-
-
-int tile_at (const Level* const level, const int x, const int y) {
-  assert(x >= 0);
-  assert(x < level->width);
-  assert(y >= 0);
-  assert(y < level->height);
-  return level->tiles[y * level->width + x];
-}
-
-
-bool see_through (const Level* const level, const int x, const int y) {
-  return tile_at(level, x, y) == 0;
 }
 
 
@@ -329,7 +390,7 @@ bool collide (MarkList* const mark_list, const Level level, Actor* const actor) 
       if (at >= tcy + TILE_SIZE) continue;
 
       mark(mark_list, MARK_TILE_PLAYER_ON, x, y);
-      if (!passable(tile_at(&level, x, y))) {
+      if (!passable(&level, x, y)) {
         const double tpx = actor->x - pc(x);
         const double tpy = actor->y - pc(y);
 
@@ -426,6 +487,30 @@ void game (int frame, const Level level, MarkList* const mark_list, Actor* const
     }
     ++i;
   } while (collide(mark_list, level, player));
+
+  const int tx = tc(player->x);
+  const int ty = tc(player->y);
+  const double a = player->angle / 180.0 * M_PI;
+
+  double fr = player->radius;
+  int fx;
+  int fy;
+
+  do {
+    fr += TILE_SIZE / 2;
+    fx = tc(player->x + fr * cos(a));
+    fy = tc(player->y - fr * sin(a));
+  }
+  while (fx == tx && fy == ty);
+
+  mark(mark_list, MARK_TILE_PLAYER_FACING, fx, fy);
+
+  if (actions[ACTIVATE]) {
+    Tile* tile = tile_at(&level, fx, fy);
+    const bool toggled = !tile->active;
+    tile->active = toggled;
+    log_d("Tile (%d, %d) is now %s", fx, fy, toggled ? "active" : "inactive");
+  }
 }
 
 
@@ -688,8 +773,8 @@ void draw_level (const Level level, const GLuint tile_textures[],
   int i = 0;
   for (int y = 0; y < level.height; ++y) {
     for (int x = 0; x < level.width; ++x) {
-      const int tile = level.tiles[i];
-      const GLuint texture = tile_textures[tile];
+      const int code = level.tiles[i].code + level.tiles[i].active ? 1 : 0;
+      const GLuint texture = tile_textures[code];
       draw_tile(texture, x, y); 
       if (!sight_get(sight, x, y)) {
         draw_tile(darkness, x, y);
@@ -723,16 +808,19 @@ int main (int argc, char *argv[]) {
 
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  glEnable(GL_TEXTURE_2D);
+  glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
 
-  GLint tex_floor = load_texture("floor.png", TEXTURE_SIZE);
-  GLint tex_wall = load_texture("wall.png", TEXTURE_SIZE);
-  GLint tex_actor = load_texture("actor.png", TEXTURE_SIZE);
+  GLint tex_actor = load_texture("actor2.png", TEXTURE_SIZE);
   GLint tex_mark = load_texture("mark.png", TEXTURE_SIZE);
   GLint tex_dot = load_texture("dot.png", TEXTURE_SIZE);
   GLint tex_darkness = load_texture("darkness.png", TEXTURE_SIZE);
 
-  GLint tile_textures[] = { tex_floor, tex_wall };
+  GLint tile_textures[] = {
+    load_texture("floor.png", TEXTURE_SIZE),
+    load_texture("wall.png", TEXTURE_SIZE),
+    load_texture("door.png", TEXTURE_SIZE),
+    load_texture("door-open.png", TEXTURE_SIZE)
+  };
 
   int frame = 0;
 
@@ -747,9 +835,10 @@ int main (int argc, char *argv[]) {
     { FORWARD  , SDLK_UP    }, 
     { BACKWARD , SDLK_DOWN  }, 
     { LEFT     , SDLK_LEFT  },
-    { RIGHT    , SDLK_RIGHT }
+    { RIGHT    , SDLK_RIGHT },
+    { ACTIVATE , SDLK_SPACE }
   };
-  const int MAPPING_COUNT = 4;
+  const int MAPPING_COUNT = 5;
 
   bool actions[ACTION_COUNT];
 
@@ -800,21 +889,25 @@ int main (int argc, char *argv[]) {
 
     glClear(GL_COLOR_BUFFER_BIT);
 
+    glEnable(GL_TEXTURE_2D);
     draw_level(level, tile_textures, tex_darkness, sight);
     free_sight(sight);
+
+    draw_texture(tex_actor, player.x, player.y, player.angle, true);
 
     for (int i = 0; i < mark_list.len; ++i) {
       switch (marks[i].reason) {
         case MARK_TILE_PLAYER_ON:
           draw_tile(tex_mark, marks[i].x, marks[i].y);
           break;
-        case MARK_DOT:
-          draw_texture(tex_dot, marks[i].x, marks[i].y, 0, true);
+        case MARK_TILE_PLAYER_FACING:
+          draw_tile(tex_dot, marks[i].x, marks[i].y);
           break;
       }
     }
 
-    draw_texture(tex_actor, player.x, player.y, player.angle, true);
+    glDisable(GL_TEXTURE_2D);
+    glEnd();
 
     SDL_GL_SwapBuffers();
   }
@@ -823,5 +916,4 @@ int main (int argc, char *argv[]) {
 
   SDL_Quit();
 }
-
 
