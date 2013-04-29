@@ -15,7 +15,8 @@
 
 
 static const int TEXTURE_SIZE = 32;
-static const int TILE_SIZE = 320;
+static const int COORD_PREC = 100;
+static const int TILE_SIZE = 3200;
 
 
 static const int NULL_TEXTURE = 0;
@@ -37,6 +38,39 @@ int pc_corner (const int tile_coord) {
 int tc (const int pixel_coord) {
   return pixel_coord / TILE_SIZE;
 }
+
+
+bool bresenham (int x0, int y0, int x1, int y1, bool (*callback) (int, int, const void*, void*), const void* data_in, void* data_out) {
+  const int dx = abs(x1 - x0);
+  const int dy = abs(y1 - y0);
+
+  const int sx = (x0 < x1) ? 1 : -1;
+  const int sy = (y0 < y1) ? 1 : -1;
+
+  int err = dx - dy;
+
+  for (;;) {
+    if (x0 == x1 && y0 == y1) {
+      return true;
+    }
+
+    const bool cont = callback(x0, y0, data_in, data_out);
+    if (!cont) {
+      return false;
+    }
+
+    const int e2 = 2 * err;
+    if (e2 > -dy) {
+      err -= dy;
+      x0 += sx;
+    }
+    if (e2 < dx) {
+      err += dx;
+      y0 += sy;
+    }
+  }
+}
+
 
 
 typedef struct {
@@ -241,11 +275,20 @@ void turn (Actor* const actor, int degrees) {
 }
 
 
+void move (Actor* const actor, const int step) {
+  double angle_rad = actor->angle / 180.0 * M_PI;
+
+  actor->x += step * cos(angle_rad);
+  actor->y -= step * sin(angle_rad);
+}
+
+
 typedef enum {
   MARK_TILE_PLAYER_ON,
   MARK_TILE_PLAYER_FACING,
   MARK_DOT,
   MARK_CAN_SEE,
+  MARK_ACTOR_SIGHT,
 } MarkReason;
 
 
@@ -481,21 +524,105 @@ void check_tiles (const Level* const level) {
 }
 
 
-void game (int frame, const Level level, MarkList* const mark_list, Actor* const player, const bool actions[]) {
+typedef struct {
+  Actor* actors;
+  int len;
+  int max;
+} ActorList;
+
+
+bool line_of_sight_callback (int x, int y, const void* in, void* out) {
+  const Level* level = in;;
+  return see_through(level, x, y);
+}
+
+
+bool mark_actor_sight_callback (int x, int y, const void* in, void* out) {
+  MarkList* mark_list = out;
+  mark(mark_list, MARK_ACTOR_SIGHT, x, y);
+  return true;
+}
+
+
+bool line_of_sight (MarkList* mark_list, const Level* level, int x1, int y1, int x2, int y2) {
+  if (bresenham(x1, y1, x2, y2, line_of_sight_callback, level, NULL)) {
+    bresenham(x1, y1, x2, y2, mark_actor_sight_callback, NULL, mark_list);
+    return true;
+  }
+  else {
+    return false;
+  }
+}
+
+
+void move_actors (MarkList* mark_list, const ActorList* actor_list, Level* level, const Actor* player) {
+  const int px = player->x;
+  const int py = player->y;
+
+  for (int i = 0; i < actor_list->len; ++i) {
+    Actor* const actor = &actor_list->actors[i];
+    const int ax = actor->x;
+    const int ay = actor->y;
+
+    // Vector from actor to player
+    const double dx = px - ax;
+    const double dy = py - ay;
+
+    int to_player = atan2(-dy, dx) / M_PI * 180.0;
+    if (to_player < 0) {
+      to_player = 360 + to_player;
+    }
+
+    int diff = to_player - actor->angle;
+    if (diff > 180) {
+      diff -= 360;
+    }
+    else if (diff < -180) {
+      diff += 360;
+    }
+
+    const int ACTOR_FOV = 180;
+    if (abs(diff) < ACTOR_FOV / 2.0) {
+      const bool los = line_of_sight(mark_list, level,
+          tc(actor->x), tc(actor->y), tc(px), tc(py));
+
+      if (los) {
+        const int ACTOR_TURN = 3;
+        if (diff > 10) {
+          turn(actor, ACTOR_TURN);
+        }
+        else if (diff < 10) {
+          turn(actor, -ACTOR_TURN);
+        }
+
+        const int ACTOR_STEP = 300;
+
+        if (length(dx, dy) > player->radius + actor->radius + 2 * ACTOR_STEP) {
+          move(actor, ACTOR_STEP); 
+        }
+      }
+    }
+  }
+}
+
+
+void game (int frame, Level level, MarkList* const mark_list, Actor* const player, const bool actions[], const ActorList actors) {
+  const int PLAYER_TURN = 6;
+  const int PLAYER_STEP = 400;
+
   if (actions[LEFT] | actions[RIGHT]) {
-    turn(player, actions[LEFT] ? 6 : -6);
+    turn(player, actions[LEFT] ? PLAYER_TURN : -PLAYER_TURN);
   }
   if (actions[FORWARD] || actions[BACKWARD]) {
-    double angle_rad = player->angle / 180.0 * M_PI;
-
-    const double step = actions[FORWARD] ? 40 : -20;
-
-    player->x += step * cos(angle_rad);
-    player->y -= step * sin(angle_rad);
+    const int step = actions[FORWARD] ? PLAYER_STEP : -PLAYER_STEP;
+    move(player, step);
   }
+
+  move_actors(mark_list, &actors, &level, player);
 
   check_tiles(&level);
 
+  bool moved = false;
   static const int tries = 10;
   int i = 0;
   do {
@@ -505,7 +632,13 @@ void game (int frame, const Level level, MarkList* const mark_list, Actor* const
       break;
     }
     ++i;
-  } while (collide(mark_list, level, player));
+    moved = collide(mark_list, level, player);
+    for (int i = 0; i < actors.len; ++i) {
+      if (collide(mark_list, level, &actors.actors[i])) {
+        moved = true;
+      }
+    }
+  } while (moved);
 
   const int tx = tc(player->x);
   const int ty = tc(player->y);
@@ -595,40 +728,9 @@ bool sight_get (const Sight* const sight, int x, int y) {
 }
 
 
-void bresenham (int x0, int y0, int x1, int y1, bool (*callback) (void*, int, int), void* data) {
-  const int dx = abs(x1 - x0);
-  const int dy = abs(y1 - y0);
-
-  const int sx = (x0 < x1) ? 1 : -1;
-  const int sy = (y0 < y1) ? 1 : -1;
-
-  int err = dx - dy;
-
-  for (;;) {
-    const bool cont = callback(data, x0, y0);
-
-    if (!cont || x0 == x1 && y0 == y1) {
-      break;
-    }
-
-    const int e2 = 2 * err;
-    if (e2 > -dy) {
-      err -= dy;
-      x0 += sx;
-    }
-    if (e2 < dx) {
-      err += dx;
-      y0 += sy;
-    }
-  }
-}
-
-
-bool sight_callback (void* data, int x, int y) {
-  void** params = data;
-
-  const Level* level = params[0];
-  Sight* sight = params[1];
+bool sight_callback (int x, int y, const void* in, void* out) {
+  Sight* sight = out;
+  const Level* level = in;
 
   sight_set(sight, x, y);
 
@@ -636,7 +738,7 @@ bool sight_callback (void* data, int x, int y) {
 }
 
 
-Sight* compute_sight (Level level, const Actor actor, int radius) {
+Sight* compute_sight (const Level level, const Actor actor, int radius) {
   Sight* sight = malloc(sizeof(Sight));;
   if (sight == NULL) {
     log_e("Failed to allocate Sight: %s", strerror(errno));
@@ -669,7 +771,6 @@ Sight* compute_sight (Level level, const Actor actor, int radius) {
     return NULL;
   }
 
-  void* data[] = { &level, sight };
   int x = radius;
   int y = 0;
   int dx = 1 - radius * 2;
@@ -677,14 +778,14 @@ Sight* compute_sight (Level level, const Actor actor, int radius) {
   int err = 0;
 
   while (x >= y) {
-    bresenham(atx, aty, atx + x, aty + y, sight_callback, data);
-    bresenham(atx, aty, atx + y, aty + x, sight_callback, data);
-    bresenham(atx, aty, atx - x, aty + y, sight_callback, data);
-    bresenham(atx, aty, atx - y, aty + x, sight_callback, data);
-    bresenham(atx, aty, atx - x, aty - y, sight_callback, data);
-    bresenham(atx, aty, atx - y, aty - x, sight_callback, data);
-    bresenham(atx, aty, atx + x, aty - y, sight_callback, data);
-    bresenham(atx, aty, atx + y, aty - x, sight_callback, data);
+    bresenham(atx, aty, atx + x, aty + y, sight_callback, &level, sight);
+    bresenham(atx, aty, atx + y, aty + x, sight_callback, &level, sight);
+    bresenham(atx, aty, atx - x, aty + y, sight_callback, &level, sight);
+    bresenham(atx, aty, atx - y, aty + x, sight_callback, &level, sight);
+    bresenham(atx, aty, atx - x, aty - y, sight_callback, &level, sight);
+    bresenham(atx, aty, atx - y, aty - x, sight_callback, &level, sight);
+    bresenham(atx, aty, atx + x, aty - y, sight_callback, &level, sight);
+    bresenham(atx, aty, atx + y, aty - x, sight_callback, &level, sight);
 
     ++y;
     err += dy;
@@ -752,7 +853,7 @@ void draw_texture (const int texture, const int x, const int y, const int angle,
   glBindTexture(GL_TEXTURE_2D, texture);
 
   glLoadIdentity();
-  glTranslated(x / 10.0, y / 10.0, 0.0);
+  glTranslated(x / (double)COORD_PREC, y / (double)COORD_PREC, 0.0);
   glRotated(angle, 0.0, 0.0, -1.0);
 
   glScaled(TEXTURE_SIZE, TEXTURE_SIZE, 1);
@@ -830,10 +931,12 @@ int main (int argc, char *argv[]) {
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
 
+  GLuint tex_player = load_texture("player.png", TEXTURE_SIZE);
   GLuint tex_actor = load_texture("actor2.png", TEXTURE_SIZE);
   GLuint tex_mark = load_texture("mark.png", TEXTURE_SIZE);
   GLuint tex_dot = load_texture("dot.png", TEXTURE_SIZE);
   GLuint tex_darkness = load_texture("darkness.png", TEXTURE_SIZE);
+  GLuint tex_actor_sight = load_texture("actor_sight.png", TEXTURE_SIZE);
 
   GLuint tile_textures[] = {
     load_texture("floor.png", TEXTURE_SIZE),
@@ -844,7 +947,9 @@ int main (int argc, char *argv[]) {
 
   int frame = 0;
 
-  Actor player = { .radius = 150, .x = pc(1), .y = pc(1), .angle = 0 };
+  const int ACTOR_R = 1500;
+
+  Actor player = { .radius = ACTOR_R, .x = pc(1), .y = pc(1), .angle = 0 };
 
   typedef struct {
     Action action;
@@ -869,6 +974,19 @@ int main (int argc, char *argv[]) {
   Level level;
 
   load_level("level.lev", &level);
+
+  Actor actors[10];
+  ActorList actor_list = {
+    .len = 0,
+    .max = 10,
+    .actors = actors
+  };
+
+  actors[0].radius = ACTOR_R;
+  actors[0].x = pc(15);
+  actors[0].y = pc(10);
+  actors[0].angle = 0;
+  actor_list.len = 1;
 
   while (running) {
     if (SDL_PollEvent(&event)) {
@@ -902,7 +1020,7 @@ int main (int argc, char *argv[]) {
     Mark marks[100];
     MarkList mark_list = { .marks = marks, .len = 0, .max_len = 100 };
 
-    game(frame++, level, &mark_list, &player, actions);
+    game(frame++, level, &mark_list, &player, actions, actor_list);
 
     const int sight_radius = 5;
     Sight* sight = compute_sight(level, player, sight_radius);
@@ -913,15 +1031,25 @@ int main (int argc, char *argv[]) {
     draw_level(level, tile_textures, tex_darkness, sight);
     free_sight(sight);
 
-    draw_texture(tex_actor, player.x, player.y, player.angle, true);
+    for (int i = 0; i < actor_list.len; ++i) {
+      const Actor* const actor = &actor_list.actors[i];
+      draw_texture(tex_actor, actor->x, actor->y, actor->angle, true);
+    }
+
+    draw_texture(tex_player, player.x, player.y, player.angle, true);
 
     for (int i = 0; i < mark_list.len; ++i) {
+      const int x = marks[i].x;
+      const int y = marks[i].y;
       switch (marks[i].reason) {
         case MARK_TILE_PLAYER_ON:
-          draw_tile(tex_mark, marks[i].x, marks[i].y);
+          draw_tile(tex_mark, x, y);
           break;
         case MARK_TILE_PLAYER_FACING:
-          draw_tile(tex_dot, marks[i].x, marks[i].y);
+          draw_tile(tex_dot, x, y);
+          break;
+        case MARK_ACTOR_SIGHT:
+          draw_tile(tex_actor_sight, x, y);
           break;
       }
     }
