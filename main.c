@@ -62,6 +62,8 @@ typedef struct Tile_ Tile;
 struct Tile_ {
   int code;
   bool active;
+  int activation_time; // -1 means cannot be activated, 0 means instant
+  int flips_in;
   bool (*passable) (const Tile*);
   bool (*see_through) (const Tile*);
 };
@@ -132,6 +134,11 @@ bool see_through (const Level* const level, const int x, const int y) {
 }
 
 
+bool can_be_activated (const Level* const level, const int x, const int y) {
+  const Tile* tile = tile_at(level, x, y);
+  return tile->activation_time >= 0 && tile->flips_in < 0;
+}
+
 
 bool load_level (const char* filename, Level* level) {
   FILE* file = fopen(filename, "r");
@@ -178,6 +185,8 @@ bool load_level (const char* filename, Level* level) {
 
     t->code = 0;
     t->active = false;
+    t->activation_time = -1;
+    t->flips_in = -1;
     t->passable = tile_never;
     t->see_through = tile_never;
 
@@ -193,6 +202,7 @@ bool load_level (const char* filename, Level* level) {
 
       case '+':
         t->code = 2;
+        t->activation_time = 10;
         t->passable = tile_if_active;
         t->see_through = tile_if_active;
         break;
@@ -200,13 +210,6 @@ bool load_level (const char* filename, Level* level) {
       default:
         log_e("Invalid tile: '%c'", c);
         break;
-    }
-  }
-
-  for (int y = 0; y < level->height; ++y) {
-    for (int x = 0; x < level->width; ++x) {
-      passable(level, x, y);
-      see_through(level, x, y);
     }
   }
 
@@ -464,6 +467,20 @@ bool collide (MarkList* const mark_list, const Level level, Actor* const actor) 
 }
 
 
+void check_tiles (const Level* const level) {
+  for (int i = 0; i < level->width * level->height; ++i) {
+    Tile* const tile = &level->tiles[i];
+    if (tile->flips_in > 0) {
+      --tile->flips_in;
+    }
+    else if (tile->flips_in == 0) {
+      tile->flips_in = -1;
+      tile->active = !tile->active;
+    }
+  }
+}
+
+
 void game (int frame, const Level level, MarkList* const mark_list, Actor* const player, const bool actions[]) {
   if (actions[LEFT] | actions[RIGHT]) {
     turn(player, actions[LEFT] ? 6 : -6);
@@ -476,6 +493,8 @@ void game (int frame, const Level level, MarkList* const mark_list, Actor* const
     player->x += step * cos(angle_rad);
     player->y -= step * sin(angle_rad);
   }
+
+  check_tiles(&level);
 
   static const int tries = 10;
   int i = 0;
@@ -502,14 +521,15 @@ void game (int frame, const Level level, MarkList* const mark_list, Actor* const
     fy = tc(player->y - fr * sin(a));
   }
   while (fx == tx && fy == ty);
-
-  mark(mark_list, MARK_TILE_PLAYER_FACING, fx, fy);
-
-  if (actions[ACTIVATE]) {
-    Tile* tile = tile_at(&level, fx, fy);
-    const bool toggled = !tile->active;
-    tile->active = toggled;
-    log_d("Tile (%d, %d) is now %s", fx, fy, toggled ? "active" : "inactive");
+  if (can_be_activated(&level, fx, fy)) {
+    if (actions[ACTIVATE]) {
+      Tile* tile = tile_at(&level, fx, fy);
+      tile->flips_in = tile->activation_time;
+      log_d("Tile (%d, %d) is now %s", fx, fy, tile->active ? "deactivating" : "activating");
+    }
+    else {
+      mark(mark_list, MARK_TILE_PLAYER_FACING, fx, fy);
+    }
   }
 }
 
@@ -685,7 +705,7 @@ void print_error (void) {
 }
 
 
-GLint load_texture (const char* filename, const int texture_size) {
+GLuint load_texture (const char* filename, const int texture_size) {
   FILE* file = fopen(filename, "rb");
   if (file == NULL) {
     log_e("Failed to open %s: %s", filename, strerror(errno));
@@ -713,7 +733,7 @@ GLint load_texture (const char* filename, const int texture_size) {
     png_read_row(png_ptr, data + row * row_bytes, NULL);
   }
 
-  GLint texture;
+  GLuint texture;
   glGenTextures(1, &texture);
   glBindTexture(GL_TEXTURE_2D, texture);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, texture_size, texture_size, 0,
@@ -773,7 +793,7 @@ void draw_level (const Level level, const GLuint tile_textures[],
   int i = 0;
   for (int y = 0; y < level.height; ++y) {
     for (int x = 0; x < level.width; ++x) {
-      const int code = level.tiles[i].code + level.tiles[i].active ? 1 : 0;
+      const int code = level.tiles[i].code + (level.tiles[i].active ? 1 : 0);
       const GLuint texture = tile_textures[code];
       draw_tile(texture, x, y); 
       if (!sight_get(sight, x, y)) {
@@ -810,12 +830,12 @@ int main (int argc, char *argv[]) {
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
 
-  GLint tex_actor = load_texture("actor2.png", TEXTURE_SIZE);
-  GLint tex_mark = load_texture("mark.png", TEXTURE_SIZE);
-  GLint tex_dot = load_texture("dot.png", TEXTURE_SIZE);
-  GLint tex_darkness = load_texture("darkness.png", TEXTURE_SIZE);
+  GLuint tex_actor = load_texture("actor2.png", TEXTURE_SIZE);
+  GLuint tex_mark = load_texture("mark.png", TEXTURE_SIZE);
+  GLuint tex_dot = load_texture("dot.png", TEXTURE_SIZE);
+  GLuint tex_darkness = load_texture("darkness.png", TEXTURE_SIZE);
 
-  GLint tile_textures[] = {
+  GLuint tile_textures[] = {
     load_texture("floor.png", TEXTURE_SIZE),
     load_texture("wall.png", TEXTURE_SIZE),
     load_texture("door.png", TEXTURE_SIZE),
