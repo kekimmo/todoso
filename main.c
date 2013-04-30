@@ -78,7 +78,19 @@ typedef struct {
   int y;
   int angle;
   int radius;
+  int tx;
+  int ty;
 } Actor;
+
+
+void init_actor (Actor* actor, int x, int y, int angle, int radius) {
+  actor->x = x;
+  actor->y = y;
+  actor->angle = angle;
+  actor->radius = radius;
+  actor->tx = -1;
+  actor->ty = -1;
+}
 
 
 typedef enum {
@@ -290,6 +302,7 @@ typedef enum {
   MARK_CAN_SEE,
   MARK_ACTOR_SIGHT,
   MARK_ACTOR_PATH,
+  MARK_ACTOR_SPOTTED,
 } MarkReason;
 
 
@@ -436,7 +449,7 @@ bool collide (MarkList* const mark_list, const Level level, Actor* const actor) 
       if (al >= tcx + TILE_SIZE) continue;
       if (at >= tcy + TILE_SIZE) continue;
 
-      mark(mark_list, MARK_TILE_PLAYER_ON, x, y);
+      //mark(mark_list, MARK_TILE_PLAYER_ON, x, y);
       if (!passable(&level, x, y)) {
         const double tpx = actor->x - pc(x);
         const double tpy = actor->y - pc(y);
@@ -786,12 +799,48 @@ int angle_diff (int angle, int dx, int dy) {
 }
 
 
+void seek_target (MarkList* mark_list, const Level* level, Actor* actor, int x, int y, int min_d) {
+  const int ax = actor->x;
+  const int ay = actor->y;
+
+  Point* path = find_path(mark_list, level, tc(ax), tc(ay), tc(x), tc(y));
+  if (path != NULL) {
+    Point* target = path;
+    if (target->next != NULL) {
+      target = target->next;
+    }
+
+    const int ACTOR_TURN = 3;
+    const int ACTOR_STEP = 300;
+
+    const int nx = pc(target->x);
+    const int ny = pc(target->y);
+
+    int diff = angle_diff(actor->angle, nx - ax, ny - ay);
+    const int dist = d(ax, ay, x, y);
+    const int close = dist < min_d + ACTOR_STEP;
+
+    if (abs(diff) > 30) {
+      turn(actor, sign(diff) * 2 * ACTOR_TURN);
+    }
+    else if (abs(diff) > 10) {
+      turn(actor, sign(diff) * ACTOR_TURN);
+    }
+    if (abs(diff) < 90 && !close) {
+      move(actor, ACTOR_STEP); 
+    }
+  }
+  free_point_list(path);
+}
+
+
 void move_actors (MarkList* mark_list, const ActorList* actor_list, const Level* level, const Actor* player) {
   const int px = player->x;
   const int py = player->y;
 
   for (int i = 0; i < actor_list->len; ++i) {
     Actor* const actor = &actor_list->actors[i];
+
     const int ax = actor->x;
     const int ay = actor->y;
 
@@ -799,43 +848,18 @@ void move_actors (MarkList* mark_list, const ActorList* actor_list, const Level*
     const double dx = px - ax;
     const double dy = py - ay;
 
-    //int diff = angle_diff(actor->angle, dx, dy);
-    const int ACTOR_TURN = 3;
-    const int ACTOR_STEP = 300;
-
-    Point* path = find_path(mark_list, level, tc(ax), tc(ay), tc(px), tc(py));
-    if (path != NULL && path->next != NULL) {
-      const int nx = pc(path->next->x);
-      const int ny = pc(path->next->y);
-      int diff = angle_diff(actor->angle, nx - ax, ny - ay);
-      if (abs(diff) > 10) {
-        turn(actor, sign(diff) * ACTOR_TURN);
-      }
-      if (length(dx, dy) > player->radius + actor->radius + 2 * ACTOR_STEP) {
-        move(actor, ACTOR_STEP); 
-      }
+    int diff = angle_diff(actor->angle, dx, dy);
+    const int ACTOR_FOV = 270;
+    const bool los = abs(diff) < ACTOR_FOV / 2.0 && line_of_sight(mark_list, level, tc(ax), tc(ay), tc(px), tc(py));
+    if (los) {
+      mark(mark_list, MARK_ACTOR_SPOTTED, ax, ay - actor->radius);
+      actor->tx = px;
+      actor->ty = py;
     }
-    free_point_list(path);
 
-    /* const int ACTOR_FOV = 180; */
-    /* if (abs(diff) < ACTOR_FOV / 2.0) { */
-    /*   const bool los = line_of_sight(mark_list, level, */
-    /*       tc(ax), tc(ay), tc(px), tc(py)); */
-
-    /*   if (los) { */
-    /*     if (diff > 10) { */
-    /*       turn(actor, ACTOR_TURN); */
-    /*     } */
-    /*     else if (diff < 10) { */
-    /*       turn(actor, -ACTOR_TURN); */
-    /*     } */
-
-
-        //if (length(dx, dy) > player->radius + actor->radius + 2 * ACTOR_STEP) {
-          //move(actor, ACTOR_STEP); 
-        //}
-      /* } */
-    /* } */
+    if (actor->tx >= 0 && actor->ty >= 0) {
+      seek_target(mark_list, level, actor, actor->tx, actor->ty, actor->radius + (los ? player->radius : 0));
+    }
   }
 }
 
@@ -1092,16 +1116,16 @@ void draw_texture (const int texture, const int x, const int y, const int angle,
 
   glBegin(GL_QUADS);
 
-  glTexCoord2d(1.0, 0.0);
+  glTexCoord2d(1.0, 1.0);
   glVertex2d(.5, .5);
 
-  glTexCoord2d(1.0, 1.0);
+  glTexCoord2d(1.0, 0.0);
   glVertex2d(.5, -.5);
 
-  glTexCoord2d(0.0, 1.0);
+  glTexCoord2d(0.0, 0.0);
   glVertex2d(-.5, -.5);
 
-  glTexCoord2d(0.0, 0.0);
+  glTexCoord2d(0.0, 1.0);
   glVertex2d(-.5, .5);
 
   glEnd();
@@ -1165,6 +1189,7 @@ int main (int argc, char *argv[]) {
   GLuint tex_dot = load_texture("dot.png", TEXTURE_SIZE);
   GLuint tex_darkness = load_texture("darkness.png", TEXTURE_SIZE);
   GLuint tex_actor_sight = load_texture("actor_sight.png", TEXTURE_SIZE);
+  GLuint tex_actor_spotted = load_texture("actor_spotted.png", TEXTURE_SIZE);
 
   GLuint tile_textures[] = {
     load_texture("floor.png", TEXTURE_SIZE),
@@ -1177,7 +1202,8 @@ int main (int argc, char *argv[]) {
 
   const int ACTOR_R = 1500;
 
-  Actor player = { .radius = ACTOR_R, .x = pc(1), .y = pc(1), .angle = 0 };
+  Actor player;
+  init_actor(&player, pc(1), pc(1), 0, ACTOR_R);
 
   typedef struct {
     Action action;
@@ -1210,10 +1236,7 @@ int main (int argc, char *argv[]) {
     .actors = actors
   };
 
-  actors[0].radius = ACTOR_R;
-  actors[0].x = pc(15);
-  actors[0].y = pc(10);
-  actors[0].angle = 0;
+  init_actor(&actors[0], pc(15), pc(10), 0, ACTOR_R);
   actor_list.len = 1;
 
   while (running) {
@@ -1250,18 +1273,19 @@ int main (int argc, char *argv[]) {
 
     game(frame++, level, &mark_list, &player, actions, actor_list);
 
-    const int sight_radius = 5;
+    const int sight_radius = 10;
     Sight* sight = compute_sight(level, player, sight_radius);
 
     glClear(GL_COLOR_BUFFER_BIT);
 
     glEnable(GL_TEXTURE_2D);
     draw_level(level, tile_textures, tex_darkness, sight);
-    free_sight(sight);
 
     for (int i = 0; i < actor_list.len; ++i) {
       const Actor* const actor = &actor_list.actors[i];
-      draw_texture(tex_actor, actor->x, actor->y, actor->angle, true);
+      if (sight_get(sight, tc(actor->x), tc(actor->y))) {
+        draw_texture(tex_actor, actor->x, actor->y, actor->angle, true);
+      }
     }
 
     draw_texture(tex_player, player.x, player.y, player.angle, true);
@@ -1279,8 +1303,16 @@ int main (int argc, char *argv[]) {
         case MARK_ACTOR_PATH:
           draw_tile(tex_actor_sight, x, y);
           break;
+
+        case MARK_ACTOR_SPOTTED:
+          if (sight_get(sight, tc(x), tc(y))) {
+            draw_texture(tex_actor_spotted, x, y - 0.6 * TILE_SIZE, 0, true);
+          };
+          break;
       }
     }
+
+    free_sight(sight);
 
     glDisable(GL_TEXTURE_2D);
     glEnd();
