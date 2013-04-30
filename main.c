@@ -424,7 +424,30 @@ Vector find_push (double dirx, double diry, double thwx, double thwy, double r, 
 }
 
 
-bool collide (MarkList* const mark_list, const Level level, Actor* const actor) {
+bool collide_actor_actor (Actor* a, Actor* b) {
+  const double dx = b->x - a->x;
+  const double dy = b->y - a->y;
+
+  const double d_len = length(dx, dy);
+  const double overlap = a->radius + b->radius - d_len;
+
+  if (overlap > 0.0) {
+    const double push_x = 0.5 * overlap * dx / d_len;
+    const double push_y = 0.5 * overlap * dy / d_len;
+
+    a->x -= round(push_x + 0.5 * sign(push_x));
+    a->y -= round(push_y + 0.5 * sign(push_y));
+    b->x += round(push_x + 0.5 * sign(push_x));
+    b->y += round(push_y + 0.5 * sign(push_y));
+
+    return true;
+  }
+
+  return false;
+}
+
+
+bool collide_level_actor (MarkList* const mark_list, const Level level, Actor* const actor) {
   const int left = tc(actor->x - actor->radius);
   const int right = tc(actor->x + actor->radius);
   const int top = tc(actor->y - actor->radius);
@@ -799,10 +822,11 @@ int angle_diff (int angle, int dx, int dy) {
 }
 
 
-void seek_target (MarkList* mark_list, const Level* level, Actor* actor, int x, int y, int min_d) {
+bool seek_target (MarkList* mark_list, const Level* level, Actor* actor, int x, int y, int min_d) {
   const int ax = actor->x;
   const int ay = actor->y;
 
+  bool found = true;
   Point* path = find_path(mark_list, level, tc(ax), tc(ay), tc(x), tc(y));
   if (path != NULL) {
     Point* target = path;
@@ -822,15 +846,19 @@ void seek_target (MarkList* mark_list, const Level* level, Actor* actor, int x, 
 
     if (abs(diff) > 30) {
       turn(actor, sign(diff) * 2 * ACTOR_TURN);
+      found = false;
     }
     else if (abs(diff) > 10) {
       turn(actor, sign(diff) * ACTOR_TURN);
+      found = false;
     }
     if (abs(diff) < 90 && !close) {
       move(actor, ACTOR_STEP); 
+      found = false;
     }
   }
   free_point_list(path);
+  return found;
 }
 
 
@@ -858,7 +886,12 @@ void move_actors (MarkList* mark_list, const ActorList* actor_list, const Level*
     }
 
     if (actor->tx >= 0 && actor->ty >= 0) {
-      seek_target(mark_list, level, actor, actor->tx, actor->ty, actor->radius + (los ? player->radius : 0));
+      const bool found = seek_target(mark_list, level,
+          actor, actor->tx, actor->ty, actor->radius + (los ? player->radius : 0));
+      if (found) {
+        actor->tx = -1;
+        actor->ty = -1;
+      }
     }
   }
 }
@@ -890,10 +923,24 @@ void game (int frame, Level level, MarkList* const mark_list, Actor* const playe
       break;
     }
     ++i;
-    moved = collide(mark_list, level, player);
+    moved = collide_level_actor(mark_list, level, player);
     for (int i = 0; i < actors.len; ++i) {
-      if (collide(mark_list, level, &actors.actors[i])) {
+      if (collide_level_actor(mark_list, level, &actors.actors[i])) {
         moved = true;
+      }
+    }
+
+    for (int i = 0; i < actors.len; ++i) {
+      if (collide_actor_actor(player, &actors.actors[i])) {
+        moved = true;
+      }
+    }
+
+    for (int i = 0; i < actors.len; ++i) {
+      for (int j = i + 1; j < actors.len; ++j) {
+        if (collide_actor_actor(&actors.actors[i], &actors.actors[j])) {
+          moved = true;
+        }
       }
     }
   } while (moved);
@@ -1237,7 +1284,10 @@ int main (int argc, char *argv[]) {
   };
 
   init_actor(&actors[0], pc(15), pc(10), 0, ACTOR_R);
-  actor_list.len = 1;
+  ++actor_list.len;
+
+  init_actor(&actors[1], pc(16), pc(5), 90, ACTOR_R);
+  ++actor_list.len;
 
   while (running) {
     if (SDL_PollEvent(&event)) {
@@ -1300,9 +1350,9 @@ int main (int argc, char *argv[]) {
         case MARK_TILE_PLAYER_FACING:
           draw_tile(tex_dot, x, y);
           break;
-        case MARK_ACTOR_PATH:
-          draw_tile(tex_actor_sight, x, y);
-          break;
+        /* case MARK_ACTOR_PATH: */
+        /*   draw_tile(tex_actor_sight, x, y); */
+        /*   break; */
 
         case MARK_ACTOR_SPOTTED:
           if (sight_get(sight, tc(x), tc(y))) {
