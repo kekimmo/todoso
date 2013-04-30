@@ -23,6 +23,7 @@ static const int NULL_TEXTURE = 0;
 
 static const int ACTOR_TURN = 3;
 static const int ACTOR_STEP = 300;
+static const int ACTOR_FOV = 180;
 
 
 // Tile coordinate to pixel coordinate (center of tile)
@@ -666,12 +667,73 @@ int find_path_h (int x1, int y1, int x2, int y2) {
 }
 
 
-Point* neighbors (const Level* level, int x1, int y1) {
+Point* neighbors (const Level* level, int x, int y) {
+  bool p[8];
+
+  // 4 0 5
+  // 1   2
+  // 6 3 7
+
+  struct {
+    int x;
+    int y;
+  } coords[8] = {
+    {  0, -1 },
+    { -1,  0 },
+    {  1,  0 },
+    {  0,  1 },
+
+    { -1, -1 },
+    {  1, -1 },
+    { -1,  1 },
+    {  1,  1 },
+  };
+
+  // Drop nonexistent tiles
+  p[0] = y > 0;
+  p[1] = x > 0;
+  p[2] = x < level->width;
+  p[3] = y < level->height;
+  p[4] = p[0] && p[1];
+  p[5] = p[0] && p[2];
+  p[6] = p[1] && p[3];
+  p[7] = p[2] && p[3];
+
+  // Drop unpassable side tiles
+  for (int i = 0; i < 4; ++i) {
+    p[i] = p[i] && passable(level, x + coords[i].x, y + coords[i].y);
+  }
+
+  // Drop corner tiles like X here:
+  // .#X
+  // .@#
+  // ...
+  /* p[4] = p[0] || p[1]; */ 
+  /* p[5] = p[0] || p[2]; */ 
+  /* p[6] = p[1] || p[3]; */ 
+  /* p[7] = p[2] || p[3]; */ 
+  // Actually, drop these too:
+  // .#X
+  // .@.
+  // ...
+  p[4] = p[0] && p[1]; 
+  p[5] = p[0] && p[2]; 
+  p[6] = p[1] && p[3]; 
+  p[7] = p[2] && p[3]; 
+
+  // Drop unpassable corner tiles
+  for (int i = 4; i < 8; ++i) {
+    p[i] = p[i] && passable(level, x + coords[i].x, y + coords[i].y);
+  }
+
+  // Make the final list
   Point* n = NULL;
-  if (x1 > 0) n = add_point(n, x1 - 1, y1);
-  if (y1 > 0) n = add_point(n, x1, y1 - 1);
-  if (x1 < level->width) n = add_point(n, x1 + 1, y1);
-  if (y1 < level->height) n = add_point(n, x1, y1 + 1);
+  for (int i = 0; i < 8; ++i) {
+    if (p[i]) {
+      n = add_point(n, x + coords[i].x, y + coords[i].y);
+    }
+  }
+
   return n;
 }
 
@@ -761,9 +823,10 @@ Point* a_star (const Level* level, int x1, int y1, int x2, int y2) {
 
     Point* n = neighbors(level, cx, cy);
     for (Point* i = n; i != NULL; i = i->next) {
-      if (!passable(level, i->x, i->y)) {
-        continue;
-      }
+      /* This check should be done by neighbors() */
+      /* if (!passable(level, i->x, i->y)) { */
+      /*   continue; */
+      /* } */
 
       const int tg = data[cx][cy].g + find_path_h(cx, cy, i->x, i->y);
       if (has_point(closed, i->x, i->y) && tg > data[i->x][i->y].g) {
@@ -921,7 +984,6 @@ void move_actors (int frame, MarkList* mark_list, const ActorList* actor_list, c
     const double dy = py - ay;
 
     int diff = angle_vector_diff(actor->angle, dx, dy);
-    const int ACTOR_FOV = 135;
     const bool los = abs(diff) < ACTOR_FOV / 2.0 && line_of_sight(mark_list, level, tc(ax), tc(ay), tc(px), tc(py));
     if (los) {
       mark(mark_list, MARK_ACTOR_SPOTTED, ax, ay - actor->radius);
@@ -1280,7 +1342,8 @@ int main (int argc, char *argv[]) {
   GLuint tex_mark = load_texture("mark.png", TEXTURE_SIZE);
   GLuint tex_dot = load_texture("dot.png", TEXTURE_SIZE);
   GLuint tex_darkness = load_texture("darkness.png", TEXTURE_SIZE);
-  GLuint tex_actor_sight = load_texture("actor_sight.png", TEXTURE_SIZE);
+  //GLuint tex_actor_sight = load_texture("actor_sight.png", TEXTURE_SIZE);
+  GLuint tex_actor_path = load_texture("actor_path.png", TEXTURE_SIZE);
   GLuint tex_actor_spotted = load_texture("actor_spotted.png", TEXTURE_SIZE);
 
   GLuint tile_textures[] = {
@@ -1328,7 +1391,7 @@ int main (int argc, char *argv[]) {
     .actors = actors
   };
 
-  init_actor(&actors[0], pc(15), pc(10), 0, ACTOR_R);
+  init_actor(&actors[0], pc(15), pc(10), 180, ACTOR_R);
   ++actor_list.len;
 
   init_actor(&actors[1], pc(16), pc(5), 90, ACTOR_R);
@@ -1395,9 +1458,9 @@ int main (int argc, char *argv[]) {
         case MARK_TILE_PLAYER_FACING:
           draw_tile(tex_dot, x, y);
           break;
-        /* case MARK_ACTOR_PATH: */
-        /*   draw_tile(tex_actor_sight, x, y); */
-        /*   break; */
+        case MARK_ACTOR_PATH:
+          draw_tile(tex_actor_path, x, y);
+          break;
 
         case MARK_ACTOR_SPOTTED:
           if (sight_get(sight, tc(x), tc(y))) {
