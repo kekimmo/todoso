@@ -21,6 +21,8 @@ static const int TILE_SIZE = 3200;
 
 static const int NULL_TEXTURE = 0;
 
+static const int ACTOR_TURN = 3;
+static const int ACTOR_STEP = 300;
 
 
 // Tile coordinate to pixel coordinate (center of tile)
@@ -37,6 +39,21 @@ int pc_corner (const int tile_coord) {
 // Pixel coordinate to tile coordinate
 int tc (const int pixel_coord) {
   return pixel_coord / TILE_SIZE;
+}
+
+
+int clamp (int number, int lower, int upper) {
+  assert(lower <= upper);
+
+  if (number < lower) {
+    return lower;
+  }
+  else if (number > upper) {
+    return upper;
+  }
+  else {
+    return number;
+  }
 }
 
 
@@ -78,8 +95,13 @@ typedef struct {
   int y;
   int angle;
   int radius;
+  int base_x;
+  int base_y;
+  int base_angle;
   int tx;
   int ty;
+  int t_angle;
+  int give_up_at;
 } Actor;
 
 
@@ -88,8 +110,13 @@ void init_actor (Actor* actor, int x, int y, int angle, int radius) {
   actor->y = y;
   actor->angle = angle;
   actor->radius = radius;
+  actor->base_x = x;
+  actor->base_y = y;
+  actor->base_angle = angle;
   actor->tx = -1;
   actor->ty = -1;
+  actor->t_angle = -1;
+  actor->give_up_at = -1;
 }
 
 
@@ -804,21 +831,28 @@ bool line_of_sight (MarkList* mark_list, const Level* level, int x1, int y1, int
 }
 
 
-int angle_diff (int angle, int dx, int dy) {
-  int to_target = atan2(-dy, dx) / M_PI * 180.0;
-  if (to_target < 0) {
-    to_target = 360 + to_target;
+int angle_dir (int angle) {
+  if (angle < -180) {
+    angle += 360;
   }
+  else if (angle > 180) {
+    angle -= 360;
+  }
+  return angle;
+}
 
-  int diff = to_target - angle;
-  if (diff > 180) {
-    diff -= 360;
-  }
-  else if (diff < -180) {
-    diff += 360;
-  }
 
-  return diff;
+int angle_diff (int a, int b) {
+  return angle_dir(b - a);
+}
+
+
+int angle_vector_diff (int angle, int dx, int dy) {
+  int angle_2 = atan2(-dy, dx) / M_PI * 180.0;
+  if (angle_2 < 0) {
+    angle_2 += 360;
+  }
+  return angle_diff(angle, angle_2);
 }
 
 
@@ -834,13 +868,10 @@ bool seek_target (MarkList* mark_list, const Level* level, Actor* actor, int x, 
       target = target->next;
     }
 
-    const int ACTOR_TURN = 3;
-    const int ACTOR_STEP = 300;
-
     const int nx = pc(target->x);
     const int ny = pc(target->y);
 
-    int diff = angle_diff(actor->angle, nx - ax, ny - ay);
+    int diff = angle_vector_diff(actor->angle, nx - ax, ny - ay);
     const int dist = d(ax, ay, x, y);
     const int close = dist < min_d + ACTOR_STEP;
 
@@ -862,7 +893,20 @@ bool seek_target (MarkList* mark_list, const Level* level, Actor* actor, int x, 
 }
 
 
-void move_actors (MarkList* mark_list, const ActorList* actor_list, const Level* level, const Actor* player) {
+bool should_give_up (int frame, const Actor* actor) {
+  return actor->give_up_at >= 0 && actor->give_up_at <= frame;
+}
+
+
+void return_to_base (Actor* actor) {
+  actor->tx = actor->base_x;
+  actor->ty = actor->base_y;
+  actor->t_angle = actor->base_angle;
+  actor->give_up_at = -1;
+}
+
+
+void move_actors (int frame, MarkList* mark_list, const ActorList* actor_list, const Level* level, const Actor* player) {
   const int px = player->x;
   const int py = player->y;
 
@@ -876,22 +920,38 @@ void move_actors (MarkList* mark_list, const ActorList* actor_list, const Level*
     const double dx = px - ax;
     const double dy = py - ay;
 
-    int diff = angle_diff(actor->angle, dx, dy);
-    const int ACTOR_FOV = 270;
+    int diff = angle_vector_diff(actor->angle, dx, dy);
+    const int ACTOR_FOV = 135;
     const bool los = abs(diff) < ACTOR_FOV / 2.0 && line_of_sight(mark_list, level, tc(ax), tc(ay), tc(px), tc(py));
     if (los) {
       mark(mark_list, MARK_ACTOR_SPOTTED, ax, ay - actor->radius);
       actor->tx = px;
       actor->ty = py;
+      actor->give_up_at = -1;
+    }
+
+    if (should_give_up(frame, actor)) {
+      return_to_base(actor);
     }
 
     if (actor->tx >= 0 && actor->ty >= 0) {
       const bool found = seek_target(mark_list, level,
           actor, actor->tx, actor->ty, actor->radius + (los ? player->radius : 0));
       if (found) {
+        if (actor->tx != actor->base_x && actor->ty != actor->base_y) {
+          actor->give_up_at = frame + 60;
+        }
         actor->tx = -1;
         actor->ty = -1;
       }
+    }
+
+    if (actor->tx == -1 && actor->ty == -1 && actor->t_angle != -1) {
+      const int ad = angle_diff(actor->angle, actor->t_angle);
+      if (ad == 0) {
+        actor->t_angle = -1;
+      }
+      turn(actor, clamp(ad, -ACTOR_TURN, ACTOR_TURN));
     }
   }
 }
@@ -909,7 +969,7 @@ void game (int frame, Level level, MarkList* const mark_list, Actor* const playe
     move(player, step);
   }
 
-  move_actors(mark_list, &actors, &level, player);
+  move_actors(frame, mark_list, &actors, &level, player);
 
   check_tiles(&level);
 
@@ -968,21 +1028,6 @@ void game (int frame, Level level, MarkList* const mark_list, Actor* const playe
     else {
       mark(mark_list, MARK_TILE_PLAYER_FACING, fx, fy);
     }
-  }
-}
-
-
-int clamp (int number, int lower, int upper) {
-  assert(lower <= upper);
-
-  if (number < lower) {
-    return lower;
-  }
-  else if (number > upper) {
-    return upper;
-  }
-  else {
-    return number;
   }
 }
 
@@ -1333,9 +1378,9 @@ int main (int argc, char *argv[]) {
 
     for (int i = 0; i < actor_list.len; ++i) {
       const Actor* const actor = &actor_list.actors[i];
-      if (sight_get(sight, tc(actor->x), tc(actor->y))) {
+      /* if (sight_get(sight, tc(actor->x), tc(actor->y))) { */
         draw_texture(tex_actor, actor->x, actor->y, actor->angle, true);
-      }
+      /* } */
     }
 
     draw_texture(tex_player, player.x, player.y, player.angle, true);
