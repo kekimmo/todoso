@@ -289,6 +289,7 @@ typedef enum {
   MARK_DOT,
   MARK_CAN_SEE,
   MARK_ACTOR_SIGHT,
+  MARK_ACTOR_PATH,
 } MarkReason;
 
 
@@ -524,6 +525,218 @@ void check_tiles (const Level* const level) {
 }
 
 
+typedef struct Point_ {
+  int x;
+  int y;
+  struct Point_* next;
+} Point;
+
+
+Point* add_point (Point* head, int x, int y) {
+  Point* p = malloc(sizeof(Point));
+  p->x = x;
+  p->y = y;
+  p->next = head;
+  return p;
+}
+
+
+Point* remove_point (Point* head, int x, int y) {
+  if (head == NULL) {
+    return NULL;
+  }
+  else if (head->x == x && head->y == y) {
+    Point* new_head = head->next;
+    free(head);
+    return new_head;
+  }
+  else {
+    for (Point* i = head; i->next != NULL; i = i->next) {
+      if (i->next->x == x && i->next->y == y) {
+        Point* new_next = i->next->next;
+        free(i->next);
+        i->next = new_next;
+        break;
+      }
+      
+    }
+    return head;
+  }
+}
+
+
+bool has_point (Point* head, int x, int y) {
+  while (head != NULL) {
+    if (head->x == x && head->y == y) {
+      return true;
+    }
+    head = head->next;
+  }
+  return false;
+}
+
+
+void free_point_list (Point* point) {
+  if (point != NULL) {
+    free_point_list(point->next);
+    free(point);
+  }
+}
+
+
+Point* remove_last_point (Point* point) {
+  if (point == NULL) {
+    return NULL;
+  }
+  else {
+    Point* new_next = point->next;
+    free(point);
+    return point->next;
+  }
+}
+
+
+int find_path_h (int x1, int y1, int x2, int y2) {
+  const int dx = x2 - x1;
+  const int dy = y2 - y1;
+  return dx*dx + dy*dy;
+}
+
+
+Point* neighbors (const Level* level, int x1, int y1) {
+  Point* n = NULL;
+  if (x1 > 0) n = add_point(n, x1 - 1, y1);
+  if (y1 > 0) n = add_point(n, x1, y1 - 1);
+  if (x1 < level->width) n = add_point(n, x1 + 1, y1);
+  if (y1 < level->height) n = add_point(n, x1, y1 + 1);
+  return n;
+}
+
+
+bool dfs (const Level* level, Point** path, int x1, int y1, int x2, int y2) {
+  if (x1 >= 0 && y1 >= 0 && x1 < level->width && y1 < level->height &&
+      !has_point(*path, x1, y1) && passable(level, x1, y1)) {
+    *path = add_point(*path, x1, y1);
+
+    if (x1 == x2 && y1 == y2) {
+      return true;
+    }
+
+    Point* n = neighbors(level, x1, y1); 
+
+    while (n != NULL) {
+      Point* best = n;
+      int best_h = find_path_h(n->x, n->y, x2, y2);
+      for (Point* i = n->next; i != NULL; i = i->next) {
+        const int i_h = find_path_h(i->x, i->y, x2, y2);
+        if (i_h < best_h) {
+          best = i;
+          best_h = i_h;
+        }
+      }
+
+      if (dfs(level, path, best->x, best->y, x2, y2)) {
+        return true;
+      }
+      else {
+        n = remove_point(n, best->x, best->y);
+      }
+    }
+
+    *path = remove_last_point(*path);
+  }
+
+  return false;
+}
+
+
+Point* a_star (const Level* level, int x1, int y1, int x2, int y2) {
+  Point* closed = NULL;
+  Point* open = add_point(NULL, x1, y1);
+  struct {
+    int g;
+    int f;
+    int from_x;
+    int from_y;
+  } data[level->width][level->height];
+
+  data[x1][y1].g = 0;
+  data[x1][y1].f = find_path_h(x1, y1, x2, y2);
+
+  while (open != NULL) {
+    Point* cur = open;
+    int min_f = data[open->x][open->y].f;
+    for (Point* i = open; i != NULL; i = i->next) {
+      const int f = data[i->x][i->y].f;
+      if (f < min_f) {
+        cur = i;
+        min_f = f;
+      }
+    }
+
+    const int cx = cur->x;
+    const int cy = cur->y;
+
+    if (cx == x2 && cy == y2) {
+      int x = cx;
+      int y = cy;
+      Point* path = add_point(NULL, x, y);
+      while (x != x1 || y != y1) {
+        path = add_point(path, data[x][y].from_x, data[x][y].from_y);
+        x = path->x;
+        y = path->y;
+      }
+
+      free_point_list(closed);
+      free_point_list(open);
+
+      return path;
+    }
+
+    open = remove_point(open, cx, cy);
+    closed = add_point(closed, cx, cy);
+
+    Point* n = neighbors(level, cx, cy);
+    for (Point* i = n; i != NULL; i = i->next) {
+      if (!passable(level, i->x, i->y)) {
+        continue;
+      }
+
+      const int tg = data[cx][cy].g + find_path_h(cx, cy, i->x, i->y);
+      if (has_point(closed, i->x, i->y) && tg > data[i->x][i->y].g) {
+        continue;
+      }
+
+      if (!has_point(open, i->x, i->y) || tg < data[i->x][i->y].g) {
+        data[i->x][i->y].from_x = cx;
+        data[i->x][i->y].from_y = cy;
+        data[i->x][i->y].g = tg;
+        data[i->x][i->y].f = tg + find_path_h(i->x, i->y, x2, y2);
+        if (!has_point(open, i->x, i->y)) {
+          open = add_point(open, i->x, i->y);
+        }
+      }
+    }
+  }
+
+  free_point_list(open);
+  free_point_list(closed);
+
+  return NULL;
+}
+
+
+Point* find_path (MarkList* mark_list, const Level* level, int x1, int y1, int x2, int y2) {
+  Point* path = NULL;
+  //dfs(level, &path, x1, y1, x2, y2);
+  path = a_star(level, x1, y1, x2, y2);
+  for (Point* i = path; i != NULL; i = i->next) {
+    mark(mark_list, MARK_ACTOR_PATH, i->x, i->y);
+  }
+  return path;
+}
+
+
 typedef struct {
   Actor* actors;
   int len;
@@ -546,7 +759,7 @@ bool mark_actor_sight_callback (int x, int y, const void* in, void* out) {
 
 bool line_of_sight (MarkList* mark_list, const Level* level, int x1, int y1, int x2, int y2) {
   if (bresenham(x1, y1, x2, y2, line_of_sight_callback, level, NULL)) {
-    bresenham(x1, y1, x2, y2, mark_actor_sight_callback, NULL, mark_list);
+    //bresenham(x1, y1, x2, y2, mark_actor_sight_callback, NULL, mark_list);
     return true;
   }
   else {
@@ -555,7 +768,25 @@ bool line_of_sight (MarkList* mark_list, const Level* level, int x1, int y1, int
 }
 
 
-void move_actors (MarkList* mark_list, const ActorList* actor_list, Level* level, const Actor* player) {
+int angle_diff (int angle, int dx, int dy) {
+  int to_target = atan2(-dy, dx) / M_PI * 180.0;
+  if (to_target < 0) {
+    to_target = 360 + to_target;
+  }
+
+  int diff = to_target - angle;
+  if (diff > 180) {
+    diff -= 360;
+  }
+  else if (diff < -180) {
+    diff += 360;
+  }
+
+  return diff;
+}
+
+
+void move_actors (MarkList* mark_list, const ActorList* actor_list, const Level* level, const Actor* player) {
   const int px = player->x;
   const int py = player->y;
 
@@ -568,40 +799,43 @@ void move_actors (MarkList* mark_list, const ActorList* actor_list, Level* level
     const double dx = px - ax;
     const double dy = py - ay;
 
-    int to_player = atan2(-dy, dx) / M_PI * 180.0;
-    if (to_player < 0) {
-      to_player = 360 + to_player;
-    }
+    //int diff = angle_diff(actor->angle, dx, dy);
+    const int ACTOR_TURN = 3;
+    const int ACTOR_STEP = 300;
 
-    int diff = to_player - actor->angle;
-    if (diff > 180) {
-      diff -= 360;
-    }
-    else if (diff < -180) {
-      diff += 360;
-    }
-
-    const int ACTOR_FOV = 180;
-    if (abs(diff) < ACTOR_FOV / 2.0) {
-      const bool los = line_of_sight(mark_list, level,
-          tc(actor->x), tc(actor->y), tc(px), tc(py));
-
-      if (los) {
-        const int ACTOR_TURN = 3;
-        if (diff > 10) {
-          turn(actor, ACTOR_TURN);
-        }
-        else if (diff < 10) {
-          turn(actor, -ACTOR_TURN);
-        }
-
-        const int ACTOR_STEP = 300;
-
-        if (length(dx, dy) > player->radius + actor->radius + 2 * ACTOR_STEP) {
-          move(actor, ACTOR_STEP); 
-        }
+    Point* path = find_path(mark_list, level, tc(ax), tc(ay), tc(px), tc(py));
+    if (path != NULL && path->next != NULL) {
+      const int nx = pc(path->next->x);
+      const int ny = pc(path->next->y);
+      int diff = angle_diff(actor->angle, nx - ax, ny - ay);
+      if (abs(diff) > 10) {
+        turn(actor, sign(diff) * ACTOR_TURN);
+      }
+      if (length(dx, dy) > player->radius + actor->radius + 2 * ACTOR_STEP) {
+        move(actor, ACTOR_STEP); 
       }
     }
+    free_point_list(path);
+
+    /* const int ACTOR_FOV = 180; */
+    /* if (abs(diff) < ACTOR_FOV / 2.0) { */
+    /*   const bool los = line_of_sight(mark_list, level, */
+    /*       tc(ax), tc(ay), tc(px), tc(py)); */
+
+    /*   if (los) { */
+    /*     if (diff > 10) { */
+    /*       turn(actor, ACTOR_TURN); */
+    /*     } */
+    /*     else if (diff < 10) { */
+    /*       turn(actor, -ACTOR_TURN); */
+    /*     } */
+
+
+        //if (length(dx, dy) > player->radius + actor->radius + 2 * ACTOR_STEP) {
+          //move(actor, ACTOR_STEP); 
+        //}
+      /* } */
+    /* } */
   }
 }
 
@@ -665,12 +899,6 @@ void game (int frame, Level level, MarkList* const mark_list, Actor* const playe
     }
   }
 }
-
-
-typedef struct {
-  int x;
-  int y;
-} Point;
 
 
 int clamp (int number, int lower, int upper) {
@@ -1048,7 +1276,7 @@ int main (int argc, char *argv[]) {
         case MARK_TILE_PLAYER_FACING:
           draw_tile(tex_dot, x, y);
           break;
-        case MARK_ACTOR_SIGHT:
+        case MARK_ACTOR_PATH:
           draw_tile(tex_actor_sight, x, y);
           break;
       }
