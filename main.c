@@ -331,6 +331,8 @@ typedef enum {
   MARK_ACTOR_SIGHT,
   MARK_ACTOR_PATH,
   MARK_ACTOR_SPOTTED,
+  MARK_ACTOR_CHASING,
+  MARK_ACTOR_LOST,
 } MarkReason;
 
 
@@ -969,6 +971,16 @@ void return_to_base (Actor* actor) {
 }
 
 
+bool has_target (const Actor* actor) {
+  return actor->tx != -1 && actor->ty != -1;
+}
+
+
+bool is_chasing (const Actor* actor) {
+  return has_target(actor) && (actor->tx != actor->base_x || actor->ty != actor->base_y);
+}
+
+
 void move_actors (int frame, MarkList* mark_list, const ActorList* actor_list, const Level* level, const Actor* player) {
   const int px = player->x;
   const int py = player->y;
@@ -990,6 +1002,10 @@ void move_actors (int frame, MarkList* mark_list, const ActorList* actor_list, c
       actor->tx = px;
       actor->ty = py;
       actor->give_up_at = -1;
+    }
+
+    if (actor->give_up_at != -1) {
+      mark(mark_list, MARK_ACTOR_LOST, ax, ay - actor->radius);
     }
 
     if (should_give_up(frame, actor)) {
@@ -1014,6 +1030,10 @@ void move_actors (int frame, MarkList* mark_list, const ActorList* actor_list, c
         actor->t_angle = -1;
       }
       turn(actor, clamp(ad, -ACTOR_TURN, ACTOR_TURN));
+    }
+
+    if (!los && is_chasing(actor)) {
+      mark(mark_list, MARK_ACTOR_CHASING, ax, ay - actor->radius);
     }
   }
 }
@@ -1345,6 +1365,8 @@ int main (int argc, char *argv[]) {
   //GLuint tex_actor_sight = load_texture("actor_sight.png", TEXTURE_SIZE);
   GLuint tex_actor_path = load_texture("actor_path.png", TEXTURE_SIZE);
   GLuint tex_actor_spotted = load_texture("actor_spotted.png", TEXTURE_SIZE);
+  GLuint tex_actor_chasing = load_texture("actor_chasing.png", TEXTURE_SIZE);
+  GLuint tex_actor_lost = load_texture("actor_lost.png", TEXTURE_SIZE);
 
   GLuint tile_textures[] = {
     load_texture("floor.png", TEXTURE_SIZE),
@@ -1463,9 +1485,21 @@ int main (int argc, char *argv[]) {
           break;
 
         case MARK_ACTOR_SPOTTED:
-          if (sight_get(sight, tc(x), tc(y))) {
+          //if (sight_get(sight, tc(x), tc(y))) {
             draw_texture(tex_actor_spotted, x, y - 0.6 * TILE_SIZE, 0, true);
-          };
+          //};
+          break;
+
+        /* case MARK_ACTOR_CHASING: */
+        /*   //if (sight_get(sight, tc(x), tc(y))) { */
+        /*     draw_texture(tex_actor_chasing, x, y - 0.6 * TILE_SIZE, 0, true); */
+        /*   //}; */
+        /*   break; */
+
+        case MARK_ACTOR_LOST:
+          //if (sight_get(sight, tc(x), tc(y))) {
+            draw_texture(tex_actor_lost, x, y - 0.6 * TILE_SIZE, 0, true);
+          //};
           break;
       }
     }
