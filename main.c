@@ -138,8 +138,10 @@ struct Tile_ {
   bool active;
   int activation_time; // -1 means cannot be activated, 0 means instant
   int flips_in;
+  bool occupied;
   bool (*passable) (const Tile*);
   bool (*see_through) (const Tile*);
+  bool (*activatable) (const Tile*);
 };
 
 
@@ -186,6 +188,10 @@ bool tile_if_active (const Tile* tile) {
   return tile->active;
 }
 
+bool tile_if_not_occupied (const Tile* tile) {
+  return !tile->occupied;
+}
+
 
 Tile* tile_at (const Level* const level, const int x, const int y) {
   assert(x >= 0);
@@ -210,7 +216,7 @@ bool see_through (const Level* const level, const int x, const int y) {
 
 bool can_be_activated (const Level* const level, const int x, const int y) {
   const Tile* tile = tile_at(level, x, y);
-  return tile->activation_time >= 0 && tile->flips_in < 0;
+  return tile->activation_time >= 0 && tile->flips_in < 0 && tile->activatable(tile);
 }
 
 
@@ -263,6 +269,7 @@ bool load_level (const char* filename, Level* level) {
     t->flips_in = -1;
     t->passable = tile_never;
     t->see_through = tile_never;
+    t->activatable = tile_never;
 
     switch (c) {
       case ' ':
@@ -279,6 +286,7 @@ bool load_level (const char* filename, Level* level) {
         t->activation_time = 10;
         t->passable = tile_if_active;
         t->see_through = tile_if_active;
+        t->activatable = tile_if_not_occupied;
         break;
 
       default:
@@ -378,6 +386,11 @@ void check_corner (Actor* const player, const double angle, const int x, const i
 
 
 int find_voronoi (const int tx, const int ty, const int ax, const int ay) {
+  // Middle (really rare but can happen e.g. with doors
+  if (ax == pc(tx) && ay == pc(ty)) {
+    return 5;
+  }
+
   const double left = pc_corner(tx);
   const double right = left + TILE_SIZE;
   const double top = pc_corner(ty);
@@ -455,8 +468,12 @@ Vector find_push (double dirx, double diry, double thwx, double thwy, double r, 
 
 
 bool collide_actor_actor (Actor* a, Actor* b) {
-  const double dx = b->x - a->x;
-  const double dy = b->y - a->y;
+  double dx = b->x - a->x;
+  double dy = b->y - a->y;
+
+  if (abs(dx) < 0.1 && abs(dy) < 0.1) {
+    dx = 0.1;
+  }
 
   const double d_len = length(dx, dy);
   const double overlap = a->radius + b->radius - d_len;
@@ -477,7 +494,7 @@ bool collide_actor_actor (Actor* a, Actor* b) {
 }
 
 
-bool collide_level_actor (MarkList* const mark_list, const Level level, Actor* const actor) {
+bool collide_level_actor (MarkList* const mark_list, const Level* const level, Actor* const actor) {
   const int left = tc(actor->x - actor->radius);
   const int right = tc(actor->x + actor->radius);
   const int top = tc(actor->y - actor->radius);
@@ -503,7 +520,7 @@ bool collide_level_actor (MarkList* const mark_list, const Level level, Actor* c
       if (at >= tcy + TILE_SIZE) continue;
 
       //mark(mark_list, MARK_TILE_PLAYER_ON, x, y);
-      if (!passable(&level, x, y)) {
+      if (!passable(level, x, y)) {
         const double tpx = actor->x - pc(x);
         const double tpy = actor->y - pc(y);
 
@@ -516,6 +533,11 @@ bool collide_level_actor (MarkList* const mark_list, const Level level, Actor* c
 
         const int voronoi = find_voronoi(x, y, actor->x, actor->y);
         switch (voronoi) {
+          case 5:
+            log_e("WTF?!", 0);
+            push.x = 1;
+            break;
+
           case 2:
             push.y = tcy - ab;
             assert(push.y < 0);
@@ -580,6 +602,7 @@ bool collide_level_actor (MarkList* const mark_list, const Level level, Actor* c
 void check_tiles (const Level* const level) {
   for (int i = 0; i < level->width * level->height; ++i) {
     Tile* const tile = &level->tiles[i];
+    tile->occupied = false;
     if (tile->flips_in > 0) {
       --tile->flips_in;
     }
@@ -1039,7 +1062,7 @@ void move_actors (int frame, MarkList* mark_list, const ActorList* actor_list, c
 }
 
 
-void game (int frame, Level level, MarkList* const mark_list, Actor* const player, const bool actions[], const ActorList actors) {
+void game (int frame, const Level* level, MarkList* const mark_list, Actor* const player, const bool actions[], const ActorList actors) {
   const int PLAYER_TURN = 6;
   const int PLAYER_STEP = 400;
 
@@ -1051,17 +1074,17 @@ void game (int frame, Level level, MarkList* const mark_list, Actor* const playe
     move(player, step);
   }
 
-  move_actors(frame, mark_list, &actors, &level, player);
+  move_actors(frame, mark_list, &actors, level, player);
 
-  check_tiles(&level);
+  check_tiles(level);
 
   bool moved = false;
   static const int tries = 10;
   int i = 0;
   do {
     if (i == tries) {
-      log_e("Collision state still unsettled after %d tries, giving up!",
-          tries);
+      /* log_e("Collision state still unsettled after %d tries, giving up!", */
+      /*     tries); */
       break;
     }
     ++i;
@@ -1089,6 +1112,15 @@ void game (int frame, Level level, MarkList* const mark_list, Actor* const playe
 
   const int tx = tc(player->x);
   const int ty = tc(player->y);
+
+  tile_at(level, tx, ty)->occupied = true;
+
+  for (int i = 0; i < actors.len; ++i) {
+    const int ax = tc(actors.actors[i].x);
+    const int ay = tc(actors.actors[i].y);
+    tile_at(level, ax, ay)->occupied = true;
+  }
+
   const double a = player->angle / 180.0 * M_PI;
 
   double fr = player->radius;
@@ -1101,9 +1133,9 @@ void game (int frame, Level level, MarkList* const mark_list, Actor* const playe
     fy = tc(player->y - fr * sin(a));
   }
   while (fx == tx && fy == ty);
-  if (can_be_activated(&level, fx, fy)) {
+  if (can_be_activated(level, fx, fy)) {
     if (actions[ACTIVATE]) {
-      Tile* tile = tile_at(&level, fx, fy);
+      Tile* tile = tile_at(level, fx, fy);
       tile->flips_in = tile->activation_time;
       log_d("Tile (%d, %d) is now %s", fx, fy, tile->active ? "deactivating" : "activating");
     }
@@ -1406,18 +1438,20 @@ int main (int argc, char *argv[]) {
 
   load_level("level.lev", &level);
 
-  Actor actors[10];
+  Actor actors[20];
   ActorList actor_list = {
     .len = 0,
-    .max = 10,
+    .max = 20,
     .actors = actors
   };
 
   init_actor(&actors[0], pc(15), pc(10), 180, ACTOR_R);
   ++actor_list.len;
 
-  init_actor(&actors[1], pc(16), pc(5), 90, ACTOR_R);
-  ++actor_list.len;
+  for (int i = 0; i < 5; ++i) {
+    init_actor(&actors[i + 1], pc(16), pc(10), 90, ACTOR_R);
+    ++actor_list.len;
+  }
 
   while (running) {
     if (SDL_PollEvent(&event)) {
@@ -1451,7 +1485,7 @@ int main (int argc, char *argv[]) {
     Mark marks[100];
     MarkList mark_list = { .marks = marks, .len = 0, .max_len = 100 };
 
-    game(frame++, level, &mark_list, &player, actions, actor_list);
+    game(frame++, &level, &mark_list, &player, actions, actor_list);
 
     const int sight_radius = 10;
     Sight* sight = compute_sight(level, player, sight_radius);
