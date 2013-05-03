@@ -1323,9 +1323,9 @@ void draw_level (const Level level, const GLuint tile_textures[],
       const int code = level.tiles[i].code + (level.tiles[i].active ? 1 : 0);
       const GLuint texture = tile_textures[code];
       draw_tile(texture, x, y); 
-      if (!sight_get(sight, x, y)) {
-        draw_tile(darkness, x, y);
-      }
+      //if (!sight_get(sight, x, y)) {
+      //  draw_tile(darkness, x, y);
+      //}
       ++i;
     }
   }
