@@ -482,9 +482,9 @@ bool collide_actor_actor (Actor* a, Actor* b) {
     const double push_x = 0.5 * overlap * dx / d_len;
     const double push_y = 0.5 * overlap * dy / d_len;
 
-    a->x -= round(push_x + 0.5 * sign(push_x));
+    a->x -= round(push_x + 0.6 * sign(push_x));
     a->y -= round(push_y + 0.5 * sign(push_y));
-    b->x += round(push_x + 0.5 * sign(push_x));
+    b->x += round(push_x + 0.4 * sign(push_x));
     b->y += round(push_y + 0.5 * sign(push_y));
 
     return true;
